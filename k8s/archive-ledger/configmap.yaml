@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: archive-ledger-config
+data:
+  ARCHIVE_LEDGER_DB_URL: jdbc:postgresql://archive-ledger-postgres:5432/archive_ledger
+  ARCHIVEOS_BASE_URL: http://archiveos-api:4000
+  ARCHIVEOS_APPROVAL_ENABLED: "false"
+  ARCHIVE_LEDGER_APPROVAL_THRESHOLD_KRW: "3000000"

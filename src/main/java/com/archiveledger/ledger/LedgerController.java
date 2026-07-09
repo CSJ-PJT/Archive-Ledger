@@ -1,0 +1,108 @@
+package com.archiveledger.ledger;
+
+import com.archiveledger.ledger.common.LedgerModels.*;
+import jakarta.validation.Valid;
+import org.springframework.format.annotation.DateTimeFormat;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+import java.time.LocalDate;
+import java.util.List;
+import java.util.Map;
+
+@RestController
+@RequestMapping("/api")
+public class LedgerController {
+    private final LedgerService ledger;
+
+    public LedgerController(LedgerService ledger) {
+        this.ledger = ledger;
+    }
+
+    @PostMapping("/events/nexus")
+    EventIngestionResponse ingest(@Valid @RequestBody NexusEventRequest request) {
+        return ledger.ingest(request);
+    }
+
+    @PostMapping("/events/nexus/bulk")
+    BulkIngestionResponse ingestBulk(@Valid @RequestBody List<NexusEventRequest> requests) {
+        return ledger.ingestBulk(requests);
+    }
+
+    @GetMapping("/events/received")
+    List<ReceivedEventView> received() {
+        return ledger.receivedEvents();
+    }
+
+    @GetMapping("/events/received/{eventId}")
+    ResponseEntity<ReceivedEventView> received(@PathVariable String eventId) {
+        return ResponseEntity.of(ledger.receivedEvent(eventId));
+    }
+
+    @GetMapping("/transactions")
+    List<TransactionView> transactions(@RequestParam(required = false) String status) {
+        return ledger.transactions(status);
+    }
+
+    @GetMapping("/transactions/{transactionId}")
+    ResponseEntity<TransactionView> transaction(@PathVariable String transactionId) {
+        return ResponseEntity.of(ledger.transaction(transactionId));
+    }
+
+    @GetMapping("/ledger/entries")
+    List<LedgerEntryView> ledgerEntries(@RequestParam(required = false) String transactionId) {
+        return ledger.ledgerEntries(transactionId);
+    }
+
+    @GetMapping("/ledger/summary")
+    LedgerSummary ledgerSummary(
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate date,
+            @RequestParam(required = false) String factoryId) {
+        return ledger.ledgerSummary(date, factoryId);
+    }
+
+    @PostMapping("/settlements/daily/run")
+    SettlementBatchView runSettlement(@RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate date) {
+        return ledger.runSettlement(date);
+    }
+
+    @GetMapping("/settlements")
+    List<SettlementBatchView> settlements() {
+        return ledger.settlements();
+    }
+
+    @GetMapping("/settlements/{batchId}")
+    SettlementBatchView settlement(@PathVariable String batchId) {
+        return ledger.settlement(batchId);
+    }
+
+    @GetMapping("/settlements/{batchId}/details")
+    List<SettlementDetailView> settlementDetails(@PathVariable String batchId) {
+        return ledger.settlementDetails(batchId);
+    }
+
+    @PostMapping("/reconciliation/daily")
+    ReconciliationView reconcile(@RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate date) {
+        return ledger.reconcile(date);
+    }
+
+    @GetMapping("/reconciliation/daily")
+    ReconciliationView reconciliation(@RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate date) {
+        return ledger.reconciliation(date);
+    }
+
+    @GetMapping("/reconciliation/summary")
+    OperationsSummary reconciliationSummary() {
+        return ledger.operationsSummary();
+    }
+
+    @PostMapping("/approvals/callback")
+    Map<String, Object> approvalCallback(@Valid @RequestBody ApprovalCallbackRequest request) {
+        return ledger.approvalCallback(request);
+    }
+
+    @GetMapping("/operations/summary")
+    OperationsSummary operationsSummary() {
+        return ledger.operationsSummary();
+    }
+}

@@ -1,0 +1,44 @@
+services:
+  archive-ledger-postgres:
+    image: postgres:16
+    container_name: archive-ledger-postgres
+    environment:
+      POSTGRES_DB: ${ARCHIVE_LEDGER_POSTGRES_DB:-archive_ledger}
+      POSTGRES_USER: ${ARCHIVE_LEDGER_POSTGRES_USER:-archive_ledger}
+      POSTGRES_PASSWORD: ${ARCHIVE_LEDGER_POSTGRES_PASSWORD:-archive_ledger_local}
+    ports:
+      - "56543:5432"
+    volumes:
+      - archive-ledger-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  archive-ledger:
+    build:
+      context: .
+    container_name: archive-ledger
+    environment:
+      ARCHIVE_LEDGER_DB_URL: jdbc:postgresql://archive-ledger-postgres:5432/archive_ledger
+      ARCHIVE_LEDGER_DB_USERNAME: ${ARCHIVE_LEDGER_POSTGRES_USER:-archive_ledger}
+      ARCHIVE_LEDGER_DB_PASSWORD: ${ARCHIVE_LEDGER_POSTGRES_PASSWORD:-archive_ledger_local}
+      ARCHIVEOS_BASE_URL: ${ARCHIVEOS_BASE_URL:-http://host.docker.internal:4000}
+      ARCHIVEOS_APPROVAL_ENABLED: ${ARCHIVEOS_APPROVAL_ENABLED:-false}
+    ports:
+      - "18080:18080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail --silent http://localhost:18080/actuator/health > /dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 18
+      start_period: 20s
+    depends_on:
+      archive-ledger-postgres:
+        condition: service_healthy
+
+volumes:
+  archive-ledger-postgres-data:

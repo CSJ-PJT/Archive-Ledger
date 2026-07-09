@@ -1,0 +1,10 @@
+.gradle/
+build/
+out/
+data/
+*.log
+.env
+*.local
+*.tsbuildinfo
+node_modules/
+dist/

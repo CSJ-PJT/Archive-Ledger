@@ -1,0 +1,37 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: archive-ledger
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: archive-ledger
+  template:
+    metadata:
+      labels:
+        app: archive-ledger
+    spec:
+      containers:
+        - name: archive-ledger
+          image: archive-ledger:local
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 18080
+          envFrom:
+            - configMapRef:
+                name: archive-ledger-config
+            - secretRef:
+                name: archive-ledger-secret
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: 18080
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 18080
+            initialDelaySeconds: 30
+            periodSeconds: 15
