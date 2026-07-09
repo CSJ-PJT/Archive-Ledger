@@ -90,6 +90,8 @@ public class LedgerService {
             }
             jdbc.update("update received_event set processing_status='PROCESSED', processed_at=? where event_id=?",
                     ts(Instant.now()), request.eventId());
+            audit(request.eventId(), "Archive-Ledger", "EVENT_PROCESSED", "received_event", request.eventId(),
+                    "RECEIVED", "PROCESSED", Map.of("transactionId", transactionId));
             audit(transactionId, "Archive-Ledger", "TRANSACTION_CREATED", "finance_transaction", transactionId,
                     null, normalized.status(), Map.of("sourceEventId", request.eventId(), "eventType", request.eventType()));
             return new EventIngestionResponse(request.eventId(), "ACCEPTED", transactionId, "Synthetic event normalized.");
