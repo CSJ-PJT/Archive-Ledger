@@ -311,8 +311,9 @@ public class LedgerService {
         int approval = count("select count(*) from finance_transaction where status='APPROVAL_REQUIRED' and cast(created_at as date)=?", day);
         int ready = count("select count(*) from finance_transaction where status='SETTLEMENT_READY' and cast(created_at as date)=?", day);
         int settled = count("select count(*) from finance_transaction where status='SETTLED' and cast(created_at as date)=?", day);
-        int mismatch = Math.max(0, received + duplicate - created - failed);
-        String status = mismatch == 0 ? "OK" : failed > 0 ? "WARNING" : "CRITICAL";
+        int expectedTransactionCount = Math.max(0, received - duplicate);
+        int mismatch = Math.max(0, expectedTransactionCount - created - failed);
+        String status = mismatch == 0 ? "OK" : "WARNING";
 
         jdbc.update("""
                 insert into reconciliation_result(

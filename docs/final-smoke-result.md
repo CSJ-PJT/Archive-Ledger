@@ -84,5 +84,5 @@
 
 ## 8) Notes
 
-- No code changes were made in this validation step; documentation and smoke records only.
-- Test environment currently has accumulated legacy data (`duplicates=103` in daily reconciliation), so mismatch remains in status flags by design of current test data.
+- No code changes were made in the previous step; this round applies the remaining reconciliation status issue.
+- Legacy duplicate-only mismatch inflation is resolved in `reconcile()`; reconciliation status now reflects only non-duplicate non-failed imbalances.

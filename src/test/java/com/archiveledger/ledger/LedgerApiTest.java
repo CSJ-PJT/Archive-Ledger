@@ -506,6 +506,37 @@ class LedgerApiTest {
     }
 
     @Test
+    void reconciliationStatusIgnoresDuplicateEventsFromMismatchCalculation() throws Exception {
+        clearTablesForDeterministicReconciliation();
+
+        String eventId = logisticsEventId();
+        String idempotency = logisticsIdempotency();
+        String body = mapper.writeValueAsString(logisticsEvent("Archive-Logitics", eventId, idempotency, "LOGISTICS_COST_CONFIRMED", Map.of(
+                "routePlanId", "ROUTE-" + nextId("LOG"),
+                "shipmentId", "SHIP-" + nextId("SHIP"),
+                "factoryId", "FAC-A",
+                "originCode", "FAC-A",
+                "destinationCode", "DC-SEOUL-01",
+                "totalCost", 1_234L
+        )));
+
+        mvc.perform(post("/api/events/logistics").contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("ACCEPTED"));
+        mvc.perform(post("/api/events/logistics").contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("DUPLICATE"));
+
+        String summary = mvc.perform(post("/api/reconciliation/daily").param("date", LocalDate.now().toString()))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+        JsonNode summaryNode = mapper.readTree(summary);
+        assertThat(summaryNode.get("status").asText()).isEqualTo("OK");
+        assertThat(summaryNode.get("mismatch").asInt()).isEqualTo(0);
+        assertThat(summaryNode.get("duplicates").asInt()).isEqualTo(1);
+    }
+
+    @Test
     void nexusBulkStillWorks() throws Exception {
         List<Map<String, Object>> events = new ArrayList<>();
         for (int i = 0; i < 1000; i++) {
@@ -589,6 +620,17 @@ class LedgerApiTest {
 
     private List<String> accountCodes(String txId) {
         return jdbc.queryForList("select account_code from ledger_entry where transaction_id=? order by account_code", String.class, txId);
+    }
+
+    private void clearTablesForDeterministicReconciliation() {
+        jdbc.execute("delete from reconciliation_result");
+        jdbc.execute("delete from settlement_detail");
+        jdbc.execute("delete from settlement_batch");
+        jdbc.execute("delete from approval_request");
+        jdbc.execute("delete from audit_log");
+        jdbc.execute("delete from ledger_entry");
+        jdbc.execute("delete from finance_transaction");
+        jdbc.execute("delete from received_event");
     }
 
     private int count(String sql, Object... args) {
