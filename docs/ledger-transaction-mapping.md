@@ -11,7 +11,8 @@ This document describes how accepted events become finance transactions and doub
 | `DELAY_PENALTY_CONFIRMED` | `DELAY_PENALTY` |
 | `ROUTE_DEVIATION_COST_CONFIRMED` | `ROUTE_DEVIATION_COST` |
 | `COLD_CHAIN_RISK_COST_CONFIRMED` | `COLD_CHAIN_RISK_COST` |
-| `LOGISTICS_DISPATCHED` with compatibility source `Archive-Logitics` | `LOGISTICS_COST` |
+| `LOGISTICS_DAILY_SETTLEMENT_FEE_EARNED` | `LOGISTICS_DAILY_SETTLEMENT_FEE` |
+| `LOGISTICS_DISPATCHED` with logistics source `Archive-Logitics` or `Archive-Logistics` | `LOGISTICS_COST` |
 
 ## Logistics Ledger Accounts
 
@@ -22,6 +23,7 @@ This document describes how accepted events become finance transactions and doub
 | `DELAY_PENALTY` | `DELAY_PENALTY_EXPENSE` | `ACCOUNTS_PAYABLE` |
 | `ROUTE_DEVIATION_COST` | `ROUTE_DEVIATION_EXPENSE` | `ACCOUNTS_PAYABLE` |
 | `COLD_CHAIN_RISK_COST` | `COLD_CHAIN_RISK_EXPENSE` | `ACCOUNTS_PAYABLE` |
+| `LOGISTICS_DAILY_SETTLEMENT_FEE` | `LOGISTICS_SETTLEMENT_EXPENSE` | `ACCOUNTS_PAYABLE` |
 
 ## Direct Nexus Mapping
 

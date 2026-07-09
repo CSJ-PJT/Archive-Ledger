@@ -25,6 +25,20 @@ Excluded:
 curl.exe -X POST "http://localhost:18080/api/settlements/daily/run?date=2026-01-15"
 ```
 
+## Scheduled Run
+
+Docker Compose enables scheduled settlement/reconciliation for local end-to-end demos:
+
+```env
+ARCHIVE_LEDGER_SCHEDULER_ENABLED=true
+ARCHIVE_LEDGER_SETTLEMENT_SCHEDULER_ENABLED=true
+ARCHIVE_LEDGER_RECONCILIATION_SCHEDULER_ENABLED=true
+ARCHIVE_LEDGER_SCHEDULER_FIXED_DELAY_MS=60000
+ARCHIVE_LEDGER_SCHEDULER_INITIAL_DELAY_MS=15000
+```
+
+The scheduler checks the configured settlement date and runs settlement only when `SETTLEMENT_READY` transactions exist for that date. This prevents repeated empty settlement batches while still allowing automatic settlement after Nexus/Logistics events arrive.
+
 ## Verify
 
 ```powershell

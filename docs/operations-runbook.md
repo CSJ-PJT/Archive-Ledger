@@ -19,6 +19,25 @@ Check:
 
 The browser dashboard at `/process.html` shows these same checks visually and refreshes every 30 seconds.
 
+## Automatic Daily Cycle
+
+Docker/local defaults enable the scheduler:
+
+```env
+ARCHIVE_LEDGER_SCHEDULER_ENABLED=true
+ARCHIVE_LEDGER_SETTLEMENT_SCHEDULER_ENABLED=true
+ARCHIVE_LEDGER_RECONCILIATION_SCHEDULER_ENABLED=true
+ARCHIVE_LEDGER_SCHEDULER_FIXED_DELAY_MS=60000
+ARCHIVE_LEDGER_SCHEDULER_INITIAL_DELAY_MS=15000
+```
+
+Behavior:
+
+- settlement runs only when `SETTLEMENT_READY` transactions exist for the configured date;
+- `APPROVAL_REQUIRED`, `REJECTED`, duplicates, and failed events remain excluded;
+- reconciliation runs periodically and refreshes `/api/reconciliation/summary`;
+- manual APIs remain available for date-specific recovery runs.
+
 ## Event Triage
 
 ```powershell
@@ -26,7 +45,7 @@ curl.exe "http://localhost:18080/api/events/received?source=Archive-Nexus"
 curl.exe "http://localhost:18080/api/events/received?source=Archive-Logitics"
 ```
 
-Use `Archive-Logitics` only as the compatibility source value for persisted Logistics events.
+Use `Archive-Logitics` only as the compatibility source value for persisted Logistics events. New events may use `Archive-Logistics`; Ledger counts and filters both source literals as Logistics.
 
 ## Transaction Triage
 

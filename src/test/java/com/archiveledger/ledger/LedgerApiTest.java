@@ -225,6 +225,56 @@ class LedgerApiTest {
     }
 
     @Test
+    void logisticsDailySettlementFeeUsesLedgerFeePaidAndSettlementExpenseAccount() throws Exception {
+        String eventId = logisticsEventId();
+        String idempotency = logisticsIdempotency();
+        mvc.perform(post("/api/events/logistics").contentType(MediaType.APPLICATION_JSON).content(
+                        mapper.writeValueAsString(logisticsEvent("Archive-Logitics", eventId, idempotency, "LOGISTICS_DAILY_SETTLEMENT_FEE_EARNED", Map.of(
+                                "settlementId", "LGS-SETTLE-" + nextId("SETTLE"),
+                                "settlementCycleId", "LCYCLE-" + nextId("CYCLE"),
+                                "factoryId", "FAC-A",
+                                "totalCost", 90_000_000L,
+                                "ledgerFeePaid", 20_000L
+                        )))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("ACCEPTED"));
+
+        assertThat(jdbc.queryForObject("select transaction_type from finance_transaction where source_event_id=?", String.class, eventId))
+                .isEqualTo("LOGISTICS_DAILY_SETTLEMENT_FEE");
+        assertThat(transactionAmount(eventId)).isEqualTo(BigDecimal.valueOf(20_000L).setScale(2));
+        String transactionId = transactionId(eventId);
+        assertThat(accountCodes(transactionId)).containsExactlyInAnyOrder("LOGISTICS_SETTLEMENT_EXPENSE", "ACCOUNTS_PAYABLE");
+        assertThat(sum("coalesce(sum(debit_amount),0)", transactionId)).isEqualTo(sum("coalesce(sum(credit_amount),0)", transactionId));
+    }
+
+    @Test
+    void logisticsSourceSpellingAlsoSupportsDailySettlementFeeEvents() throws Exception {
+        String eventId = logisticsEventId();
+        String idempotency = logisticsIdempotency();
+        mvc.perform(post("/api/events/logistics").contentType(MediaType.APPLICATION_JSON).content(
+                        mapper.writeValueAsString(logisticsEvent("Archive-Logistics", eventId, idempotency, "LOGISTICS_DAILY_SETTLEMENT_FEE_EARNED", Map.of(
+                                "settlementId", "LGS-SETTLE-" + nextId("SETTLE"),
+                                "settlementCycleId", "LCYCLE-" + nextId("CYCLE"),
+                                "factoryId", "FAC-A",
+                                "totalCost", 90_000_000L,
+                                "ledgerFeePaid", 20_000L
+                        )))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("ACCEPTED"));
+
+        String transactionId = transactionId(eventId);
+        assertThat(jdbc.queryForObject("select source_service from finance_transaction where transaction_id=?", String.class, transactionId))
+                .isEqualTo("Archive-Logistics");
+        assertThat(accountCodes(transactionId)).containsExactlyInAnyOrder("LOGISTICS_SETTLEMENT_EXPENSE", "ACCOUNTS_PAYABLE");
+        mvc.perform(get("/api/transactions").param("source", "Archive-Logistics"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[*].sourceEventId").value(Matchers.hasItem(eventId)));
+        mvc.perform(get("/api/transactions").param("source", "Archive-Logitics"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[*].sourceEventId").value(Matchers.hasItem(eventId)));
+    }
+
+    @Test
     void urgentDeliveryCostConfirmedMapsAccountsToUrgentDeliveryExpense() throws Exception {
         String eventId = logisticsEventId();
         String idempotency = logisticsIdempotency();

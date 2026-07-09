@@ -2,7 +2,7 @@
 
 This document describes the Archive-Logistics to Archive-Ledger native event contract.
 
-External service naming uses `Archive-Logistics`. The event source literal `Archive-Logitics` remains supported for compatibility with the existing contract and query examples.
+External service naming uses `Archive-Logistics`. The event source literal `Archive-Logitics` remains supported for compatibility with the existing contract and query examples. Ledger treats both `Archive-Logistics` and `Archive-Logitics` as logistics sources for ingestion, filtering, operations summary, and reconciliation counts.
 
 ## Endpoints
 
@@ -49,6 +49,7 @@ External service naming uses `Archive-Logistics`. The event source literal `Arch
 - `DELAY_PENALTY_CONFIRMED`
 - `ROUTE_DEVIATION_COST_CONFIRMED`
 - `COLD_CHAIN_RISK_COST_CONFIRMED`
+- `LOGISTICS_DAILY_SETTLEMENT_FEE_EARNED`
 - `LOGISTICS_DISPATCHED` when received from compatibility source `Archive-Logitics`
 
 ## Amount Resolution
@@ -58,6 +59,13 @@ Ledger resolves the transaction amount in this order:
 1. `payload.totalCost`
 2. `payload.estimatedCost`
 3. `payload.amount`
+
+For `LOGISTICS_DAILY_SETTLEMENT_FEE_EARNED`, Ledger resolves the amount in this order:
+
+1. `payload.ledgerFeePaid`
+2. `payload.settlementFee`
+3. `payload.totalCost`
+4. `payload.amount`
 
 If no amount is available or the amount is less than or equal to zero, the item is processed as failed.
 
@@ -87,4 +95,4 @@ Otherwise the transaction is created as `SETTLEMENT_READY`.
 
 ## Compatibility Mode
 
-`source=Archive-Logitics` and `eventType=LOGISTICS_DISPATCHED` is normalized as `LOGISTICS_COST`. This supports the existing Archive-Ledger compatibility path while external documentation uses `Archive-Logistics`.
+`source=Archive-Logitics` or `source=Archive-Logistics` with `eventType=LOGISTICS_DISPATCHED` is normalized as `LOGISTICS_COST`. This supports the existing Archive-Ledger compatibility path while external documentation uses `Archive-Logistics`.

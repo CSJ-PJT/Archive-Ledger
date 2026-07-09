@@ -97,7 +97,9 @@ status = mismatch == 0 ? OK : WARNING
 
 외부 문서와 서비스 표기는 `Archive-Logistics`로 통일합니다.
 
-기존 계약 호환을 위해 이벤트 payload/query의 `source=Archive-Logitics` 값은 계속 수신합니다. 이 값은 과거 계약의 source literal이며, `LOGISTICS_DISPATCHED` compatibility event도 `LOGISTICS_COST`로 정규화합니다.
+기존 계약 호환을 위해 이벤트 payload/query의 `source=Archive-Logitics` 값은 계속 수신합니다. 신규 외부 표기인 `source=Archive-Logistics`도 같은 logistics source로 처리하며, 두 값 모두 조회 필터와 operations/reconciliation 집계에 포함됩니다. `Archive-Logitics`는 과거 계약의 source literal이며, `LOGISTICS_DISPATCHED` compatibility event도 `LOGISTICS_COST`로 정규화합니다.
+
+Archive-Logistics daily settlement fee 이벤트인 `LOGISTICS_DAILY_SETTLEMENT_FEE_EARNED`도 native logistics API에서 수신합니다. 이 이벤트는 `ledgerFeePaid`를 우선 금액으로 사용하고 `LOGISTICS_SETTLEMENT_EXPENSE / ACCOUNTS_PAYABLE` 원장을 생성합니다.
 
 ## 실행 방법
 
@@ -120,6 +122,25 @@ curl.exe http://localhost:18080/api/operations/summary
 
 - API: `http://localhost:18080`
 - PostgreSQL: `localhost:56543`
+
+### Scheduled Settlement / Reconciliation
+
+Docker Compose enables the operational scheduler by default:
+
+```env
+ARCHIVE_LEDGER_SCHEDULER_ENABLED=true
+ARCHIVE_LEDGER_SETTLEMENT_SCHEDULER_ENABLED=true
+ARCHIVE_LEDGER_RECONCILIATION_SCHEDULER_ENABLED=true
+ARCHIVE_LEDGER_SCHEDULER_FIXED_DELAY_MS=60000
+ARCHIVE_LEDGER_SCHEDULER_INITIAL_DELAY_MS=15000
+```
+
+The scheduled cycle:
+
+- runs settlement only when the target date has `SETTLEMENT_READY` transactions;
+- avoids creating repeated empty settlement batches;
+- runs reconciliation periodically so `/api/reconciliation/summary` stays fresh;
+- keeps manual APIs available for explicit date-based reruns.
 
 ## Smoke Test
 
@@ -144,9 +165,10 @@ curl.exe "http://localhost:18080/api/ledger/summary?source=Archive-Logitics"
 2. 운영 요약 확인: `GET /api/operations/summary`
 3. 수신 이벤트 확인: `GET /api/events/received?source=Archive-Logitics`
 4. 정산 전 승인 필요 거래 확인: `GET /api/transactions?status=APPROVAL_REQUIRED`
-5. 일별 정산 실행: `POST /api/settlements/daily/run?date=YYYY-MM-DD`
-6. 일별 대사 실행: `POST /api/reconciliation/daily?date=YYYY-MM-DD`
-7. mismatch 발생 시 `docs/reconciliation-fix.md`와 `docs/operations-runbook.md` 기준으로 원인을 분리합니다.
+5. scheduler가 켜져 있으면 `SETTLEMENT_READY` 거래는 자동 정산 대상이 됩니다.
+6. 필요 시 일별 정산 재실행: `POST /api/settlements/daily/run?date=YYYY-MM-DD`
+7. 필요 시 일별 대사 재실행: `POST /api/reconciliation/daily?date=YYYY-MM-DD`
+8. mismatch 발생 시 `docs/reconciliation-fix.md`와 `docs/operations-runbook.md` 기준으로 원인을 분리합니다.
 
 ## 문서
 

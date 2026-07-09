@@ -36,6 +36,7 @@ public class LedgerService {
     private final BigDecimal approvalThreshold;
     private static final String SOURCE_NEXUS = "Archive-Nexus";
     private static final String SOURCE_LOGITICS = "Archive-Logitics";
+    private static final String SOURCE_LOGISTICS = "Archive-Logistics";
     private static final BigDecimal LOGISTICS_APPROVAL_THRESHOLD = new BigDecimal("300000");
     private static final int BULK_RESULT_LIMIT = 50;
 
@@ -293,19 +294,24 @@ public class LedgerService {
         }
     }
 
+    public boolean hasSettlementReadyTransactions(LocalDate date) {
+        return count("select count(*) from finance_transaction where status='SETTLEMENT_READY' and cast(occurred_at as date)=?",
+                Date.valueOf(date)) > 0;
+    }
+
     @Transactional
     public ReconciliationView reconcile(LocalDate date) {
         Date day = Date.valueOf(date);
         int received = count("select count(*) from received_event where cast(received_at as date)=?", day);
         int directEvents = count("select count(*) from received_event where cast(received_at as date)=? and coalesce(source_service, source)=?",
                 day, SOURCE_NEXUS);
-        int logisticsEvents = count("select count(*) from received_event where cast(received_at as date)=? and coalesce(source_service, source)=?",
-                day, SOURCE_LOGITICS);
+        int logisticsEvents = count("select count(*) from received_event where cast(received_at as date)=? and coalesce(source_service, source) in (?,?)",
+                day, SOURCE_LOGITICS, SOURCE_LOGISTICS);
         int created = count("select count(*) from finance_transaction where cast(created_at as date)=?", day);
         int directTransactions = count("select count(*) from finance_transaction where cast(created_at as date)=? and coalesce(source_service, 'Archive-Unknown')=?",
                 day, SOURCE_NEXUS);
-        int logisticsTransactions = count("select count(*) from finance_transaction where cast(created_at as date)=? and coalesce(source_service, 'Archive-Unknown')=?",
-                day, SOURCE_LOGITICS);
+        int logisticsTransactions = count("select count(*) from finance_transaction where cast(created_at as date)=? and coalesce(source_service, 'Archive-Unknown') in (?,?)",
+                day, SOURCE_LOGITICS, SOURCE_LOGISTICS);
         int failed = count("select count(*) from received_event where processing_status='FAILED' and cast(received_at as date)=?", day);
         int duplicate = count("select count(*) from audit_log where action='DUPLICATE_EVENT' and cast(created_at as date)=?", day);
         int approval = count("select count(*) from finance_transaction where status='APPROVAL_REQUIRED' and cast(created_at as date)=?", day);
@@ -348,9 +354,14 @@ public class LedgerService {
     }
 
     public List<ReceivedEventView> receivedEvents(String source) {
-        return source == null || source.isBlank()
-                ? jdbc.query("select * from received_event order by received_at desc limit 500", this::receivedEventRow)
-                : jdbc.query("select * from received_event where coalesce(source_service, source)=? order by received_at desc limit 500",
+        if (source == null || source.isBlank()) {
+            return jdbc.query("select * from received_event order by received_at desc limit 500", this::receivedEventRow);
+        }
+        if (isLogisticsSource(source)) {
+            return jdbc.query("select * from received_event where coalesce(source_service, source) in (?,?) order by received_at desc limit 500",
+                    this::receivedEventRow, SOURCE_LOGITICS, SOURCE_LOGISTICS);
+        }
+        return jdbc.query("select * from received_event where coalesce(source_service, source)=? order by received_at desc limit 500",
                 this::receivedEventRow, source);
     }
 
@@ -367,8 +378,7 @@ public class LedgerService {
             args.add(status);
         }
         if (source != null && !source.isBlank()) {
-            sql.append(" and coalesce(source_service, 'Archive-Unknown')=?");
-            args.add(source);
+            appendSourceFilter(sql, args, "coalesce(source_service, 'Archive-Unknown')", source);
         }
         sql.append(" order by created_at desc limit 500");
         return jdbc.query(sql.toString(), this::transactionRow, args.toArray());
@@ -403,8 +413,7 @@ public class LedgerService {
             args.add(factoryId);
         }
         if (source != null && !source.isBlank()) {
-            sql.append(" and coalesce(ft.source_service, 'Archive-Unknown')=?");
-            args.add(source);
+            appendSourceFilter(sql, args, "coalesce(ft.source_service, 'Archive-Unknown')", source);
         }
         sql.append(" order by le.created_at desc");
         List<LedgerEntryView> rows = jdbc.query(sql.toString(), this::ledgerRow, args.toArray());
@@ -463,18 +472,20 @@ public class LedgerService {
         long approvalRequired = count("select count(*) from finance_transaction where status='APPROVAL_REQUIRED'");
         long settled = count("select count(*) from finance_transaction where status='SETTLED'");
         long eventsFromNexus = count("select count(*) from received_event where coalesce(source_service, source)=?", SOURCE_NEXUS);
-        long eventsFromLogitics = count("select count(*) from received_event where coalesce(source_service, source)=?", SOURCE_LOGITICS);
-        long logisticsReceived = count("select count(*) from received_event where coalesce(source_service, source)=?", SOURCE_LOGITICS);
-        long logisticsCostTransactions = count("select count(*) from finance_transaction where transaction_type='LOGISTICS_COST' and coalesce(source_service, 'Archive-Unknown')=?",
-                SOURCE_LOGITICS);
-        long urgentDeliveryTransactions = count("select count(*) from finance_transaction where transaction_type='URGENT_DELIVERY_COST' and coalesce(source_service, 'Archive-Unknown')=?",
-                SOURCE_LOGITICS);
-        long delayPenaltyTransactions = count("select count(*) from finance_transaction where transaction_type='DELAY_PENALTY' and coalesce(source_service, 'Archive-Unknown')=?",
-                SOURCE_LOGITICS);
-        long routeDeviationTransactions = count("select count(*) from finance_transaction where transaction_type='ROUTE_DEVIATION_COST' and coalesce(source_service, 'Archive-Unknown')=?",
-                SOURCE_LOGITICS);
-        long coldChainRiskTransactions = count("select count(*) from finance_transaction where transaction_type='COLD_CHAIN_RISK_COST' and coalesce(source_service, 'Archive-Unknown')=?",
-                SOURCE_LOGITICS);
+        long eventsFromLogitics = count("select count(*) from received_event where coalesce(source_service, source) in (?,?)",
+                SOURCE_LOGITICS, SOURCE_LOGISTICS);
+        long logisticsReceived = count("select count(*) from received_event where coalesce(source_service, source) in (?,?)",
+                SOURCE_LOGITICS, SOURCE_LOGISTICS);
+        long logisticsCostTransactions = count("select count(*) from finance_transaction where transaction_type='LOGISTICS_COST' and coalesce(source_service, 'Archive-Unknown') in (?,?)",
+                SOURCE_LOGITICS, SOURCE_LOGISTICS);
+        long urgentDeliveryTransactions = count("select count(*) from finance_transaction where transaction_type='URGENT_DELIVERY_COST' and coalesce(source_service, 'Archive-Unknown') in (?,?)",
+                SOURCE_LOGITICS, SOURCE_LOGISTICS);
+        long delayPenaltyTransactions = count("select count(*) from finance_transaction where transaction_type='DELAY_PENALTY' and coalesce(source_service, 'Archive-Unknown') in (?,?)",
+                SOURCE_LOGITICS, SOURCE_LOGISTICS);
+        long routeDeviationTransactions = count("select count(*) from finance_transaction where transaction_type='ROUTE_DEVIATION_COST' and coalesce(source_service, 'Archive-Unknown') in (?,?)",
+                SOURCE_LOGITICS, SOURCE_LOGISTICS);
+        long coldChainRiskTransactions = count("select count(*) from finance_transaction where transaction_type='COLD_CHAIN_RISK_COST' and coalesce(source_service, 'Archive-Unknown') in (?,?)",
+                SOURCE_LOGITICS, SOURCE_LOGISTICS);
         String status = failed > 0 ? "DEGRADED" : "HEALTHY";
         return new OperationsSummary(
                 status,
@@ -505,14 +516,30 @@ public class LedgerService {
     }
 
     private boolean isLogisticsRequest(NexusEventRequest request, String source) {
-        return SOURCE_LOGITICS.equals(source) && (
+        return isLogisticsSource(source) && (
                 "LOGISTICS_DISPATCHED".equals(request.eventType()) ||
                         "LOGISTICS_COST_CONFIRMED".equals(request.eventType()) ||
                         "URGENT_DELIVERY_COST_CONFIRMED".equals(request.eventType()) ||
                         "DELAY_PENALTY_CONFIRMED".equals(request.eventType()) ||
                         "ROUTE_DEVIATION_COST_CONFIRMED".equals(request.eventType()) ||
-                        "COLD_CHAIN_RISK_COST_CONFIRMED".equals(request.eventType())
+                        "COLD_CHAIN_RISK_COST_CONFIRMED".equals(request.eventType()) ||
+                        "LOGISTICS_DAILY_SETTLEMENT_FEE_EARNED".equals(request.eventType())
         );
+    }
+
+    private boolean isLogisticsSource(String source) {
+        return SOURCE_LOGITICS.equals(source) || SOURCE_LOGISTICS.equals(source);
+    }
+
+    private void appendSourceFilter(StringBuilder sql, List<Object> args, String expression, String source) {
+        if (isLogisticsSource(source)) {
+            sql.append(" and ").append(expression).append(" in (?,?)");
+            args.add(SOURCE_LOGITICS);
+            args.add(SOURCE_LOGISTICS);
+            return;
+        }
+        sql.append(" and ").append(expression).append("=?");
+        args.add(source);
     }
 
     private Normalized normalizeLogistics(NexusEventRequest request, String source) {
@@ -527,14 +554,11 @@ public class LedgerService {
             case "DELAY_PENALTY_CONFIRMED" -> "DELAY_PENALTY";
             case "ROUTE_DEVIATION_COST_CONFIRMED" -> "ROUTE_DEVIATION_COST";
             case "COLD_CHAIN_RISK_COST_CONFIRMED" -> "COLD_CHAIN_RISK_COST";
+            case "LOGISTICS_DAILY_SETTLEMENT_FEE_EARNED" -> "LOGISTICS_DAILY_SETTLEMENT_FEE";
             default -> throw new IllegalArgumentException("Unsupported logistics event_type: " + request.eventType());
         };
 
-        BigDecimal amount = firstNonNull(
-                decimalOrNull(payload.get("totalCost")),
-                decimalOrNull(payload.get("estimatedCost")),
-                decimalOrNull(payload.get("amount"))
-        );
+        BigDecimal amount = logisticsAmount(request.eventType(), payload);
         if (amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
             throw new IllegalArgumentException("amount is required for logistics events.");
         }
@@ -580,6 +604,22 @@ public class LedgerService {
                 requiresColdChain,
                 amount.setScale(2, RoundingMode.HALF_UP),
                 currency
+        );
+    }
+
+    private BigDecimal logisticsAmount(String eventType, Map<String, Object> payload) {
+        if ("LOGISTICS_DAILY_SETTLEMENT_FEE_EARNED".equals(eventType)) {
+            return firstNonNull(
+                    decimalOrNull(payload.get("ledgerFeePaid")),
+                    decimalOrNull(payload.get("settlementFee")),
+                    decimalOrNull(payload.get("totalCost")),
+                    decimalOrNull(payload.get("amount"))
+            );
+        }
+        return firstNonNull(
+                decimalOrNull(payload.get("totalCost")),
+                decimalOrNull(payload.get("estimatedCost")),
+                decimalOrNull(payload.get("amount"))
         );
     }
 
@@ -687,6 +727,7 @@ public class LedgerService {
             case "DELAY_PENALTY" -> new Account("DELAY_PENALTY_EXPENSE", "Synthetic Delay Penalty Expense");
             case "ROUTE_DEVIATION_COST" -> new Account("ROUTE_DEVIATION_EXPENSE", "Synthetic Route Deviation Expense");
             case "COLD_CHAIN_RISK_COST" -> new Account("COLD_CHAIN_RISK_EXPENSE", "Synthetic Cold Chain Risk Expense");
+            case "LOGISTICS_DAILY_SETTLEMENT_FEE" -> new Account("LOGISTICS_SETTLEMENT_EXPENSE", "Synthetic Logistics Settlement Expense");
             case "MAINTENANCE_EXPENSE" -> new Account("MAINTENANCE_EXPENSE", "Synthetic Maintenance Expense");
             case "QUALITY_LOSS", "QUALITY_CLAIM_CHARGEBACK" -> new Account("QUALITY_LOSS", "Synthetic Quality Loss");
             case "SHIPMENT_HOLD_COST" -> new Account("LOGISTICS_EXPENSE", "Synthetic Logistics Expense");

@@ -23,6 +23,14 @@ spring:
     baseline-version: 0
 
 archive-ledger:
+  scheduler:
+    enabled: ${ARCHIVE_LEDGER_SCHEDULER_ENABLED:false}
+    settlement-enabled: ${ARCHIVE_LEDGER_SETTLEMENT_SCHEDULER_ENABLED:true}
+    reconciliation-enabled: ${ARCHIVE_LEDGER_RECONCILIATION_SCHEDULER_ENABLED:true}
+    fixed-delay-ms: ${ARCHIVE_LEDGER_SCHEDULER_FIXED_DELAY_MS:60000}
+    initial-delay-ms: ${ARCHIVE_LEDGER_SCHEDULER_INITIAL_DELAY_MS:15000}
+    settlement-date-offset-days: ${ARCHIVE_LEDGER_SETTLEMENT_DATE_OFFSET_DAYS:0}
+    reconciliation-date-offset-days: ${ARCHIVE_LEDGER_RECONCILIATION_DATE_OFFSET_DAYS:0}
   archiveos:
     base-url: ${ARCHIVEOS_BASE_URL:http://host.docker.internal:4000}
     enabled: ${ARCHIVEOS_APPROVAL_ENABLED:false}
