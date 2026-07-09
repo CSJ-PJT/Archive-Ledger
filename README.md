@@ -1,61 +1,60 @@
 # Archive-Ledger
 
-Archive-Ledger is the synthetic financial ledger backend in the Archive ecosystem.
+Archive-Ledger는 Archive-Nexus direct 이벤트와 Archive-Logitics의 물류비 확정 이벤트를 수신해 거래 정규화, 복식 원장 기록, 승인 필요 여부 판단, 정산 제외, 대사 집계를 처리하는 Spring Boot 금융 백엔드입니다. source별 이벤트 구분, idempotency key 중복 방지, debit/credit 균형 검증으로 제조 → 물류 → 금융성 정산 흐름을 안정적으로 연결합니다.
 
-It receives events from:
+## 핵심 역할
 
-- Archive-Nexus: direct manufacturing and logistics-direct operations events
-- Archive-Logitics: logistics cost confirmation events
+- Archive-Nexus 직접 이벤트(예: 제조/물류 직접 이벤트) 수신 및 처리
+- Archive-Logitics 물류비 확정 이벤트 수신 및 처리
+- eventId/idempotencyKey 기반 duplicate-safe 처리
+- finance_transaction 생성 및 원장 분개 생성
+- 승인 필요 거래(Approval gate) 관리
+- 정산 배치 및 reconciliation 집계
+- 감사 로그 기록
 
-and processes them into finance transactions, double-entry ledger entries, settlement workflow, approvals, and reconciliation summaries.
-
-## Tech stack
-
-- Java 21, Spring Boot 3
-- Spring Web, Spring Validation, JdbcTemplate, Spring Batch, Spring Boot Actuator
-- PostgreSQL, Flyway
-- JUnit 5, AssertJ, (optionally Testcontainers in test profile)
-- Docker Compose
-
-## Run
+## 실행
 
 ```powershell
 docker compose up --build -d
+curl.exe http://localhost:18080/actuator/health
 ```
 
-| Service | URL |
+| 항목 | 주소 |
 | --- | --- |
-| Ledger API | `http://localhost:18080` |
+| API | `http://localhost:18080` |
 | Health | `http://localhost:18080/actuator/health` |
 | PostgreSQL | `localhost:56543` |
 
 ## API
 
-- `POST /api/events/nexus` (existing direct event path)
+- `POST /api/events/nexus`
 - `POST /api/events/nexus/bulk`
 - `POST /api/events/logistics`
 - `POST /api/events/logistics/bulk`
-- `GET /api/events/received?source=Archive-Logitics`
-- `GET /api/transactions?source=Archive-Logitics`
-- `GET /api/ledger/summary?source=Archive-Logitics`
+- `GET /api/events/received` (`source` 지원)
+- `GET /api/events/received/{eventId}`
+- `GET /api/transactions` (`status`, `source` 지원)
+- `GET /api/transactions/{transactionId}`
+- `GET /api/ledger/entries` (`transactionId` 지원)
+- `GET /api/ledger/summary` (`date`, `factoryId`, `source` 지원)
 - `POST /api/settlements/daily/run?date=YYYY-MM-DD`
-- `GET /api/reconciliation/daily?date=YYYY-MM-DD`
+- `GET /api/settlements`
+- `GET /api/settlements/{batchId}`
+- `GET /api/settlements/{batchId}/details`
 - `POST /api/reconciliation/daily?date=YYYY-MM-DD`
+- `GET /api/reconciliation/daily?date=YYYY-MM-DD`
 - `GET /api/reconciliation/summary`
 - `POST /api/approvals/callback`
 - `GET /api/operations/summary`
 
-## Safety rules
+## 처리 규칙(요약)
 
-- `eventId` and `idempotencyKey` are required.
-- Logistics amount resolution order: `totalCost`, `estimatedCost`, `amount`.
-- Unknown/invalid logistics amount leads to failed status.
-- `APPROVAL_REQUIRED` transactions are not included in settlement until approval callback.
-- Each processed transaction emits debit/credit entries and keeps totals equal.
-- Source filtering is supported for `events/received`, `transactions`, and `ledger/summary`.
-- `Archive-Logitics` compatibility mode supports `eventType=LOGISTICS_DISPATCHED`.
+- 물류 이벤트 금액은 `totalCost` → `estimatedCost` → `amount` 순으로 사용
+- 금액이 없거나 0 이하면 실패 처리
+- `APPROVAL_REQUIRED`는 정산 대상에서 제외
+- `source=Archive-Logitics` + `LOGISTICS_DISPATCHED`도 호환 모드로 `LOGISTICS_COST` 처리
 
-## Commands
+## 제출 검증 명령
 
 ```powershell
 .\gradlew.bat test --no-daemon --console=plain
@@ -63,13 +62,10 @@ docker compose up --build -d
 docker compose config --quiet
 ```
 
-## Docs
+## 문서
 
 - `docs/logistics-event-contract.md`
 - `docs/ledger-transaction-mapping.md`
 - `docs/demo-ledger-with-logitics.md`
+- `docs/final-smoke-result.md`
 - `docs/portfolio-bullets.md`
-
-## Portfolio
-
-Archive-Ledger · Java/Spring synthetic financial event processing backend.

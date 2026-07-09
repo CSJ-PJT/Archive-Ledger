@@ -20,6 +20,8 @@ Both endpoints accept the same event schema. Bulk format is:
 
 `POST /api/events/logistics` accepts one event object (same schema as above except `source` and wrapper are removed).
 
+`POST /api/events/logistics/bulk` is batch form and also supports high-volume smoke batches (`1..10000` in service clients, service-side processing by chunk).
+
 ## Single event payload example
 
 ```json
@@ -67,6 +69,8 @@ If none exists or resolved amount <= 0, request is processed as failed.
 
 If `payload.currency` is missing, default is `KRW`.
 
+Validation failures (`amount <= 0` or unresolved amount) return `status=FAILED` in response item and are recorded as failed received events.
+
 ## Event type to transaction mapping
 
 - `LOGISTICS_COST_CONFIRMED` -> `LOGISTICS_COST`
@@ -96,7 +100,11 @@ Otherwise status is `SETTLEMENT_READY`.
 - duplicate `eventId` or `idempotencyKey` is rejected with `status=DUPLICATE`
 - no duplicated transaction or ledger rows are created
 
+`POST /api/events/logistics/bulk` processes each item independently so one duplicate or one failure does not rollback the whole batch.
+
 ## Compatibility mode
 
 `Archive-Ledger` keeps existing `/api/events/nexus/*` path unchanged.
 When a payload from `source=Archive-Logitics` arrives with `eventType=LOGISTICS_DISPATCHED`, it is handled as logistics confirmed cost and normalized as `LOGISTICS_COST`.
+
+`sourceService` is stored in persisted events and transaction rows for source-level operations summary.

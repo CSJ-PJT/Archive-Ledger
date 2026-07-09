@@ -36,3 +36,8 @@ Notes:
 - Approval callback:
   - `APPROVED` -> `SETTLEMENT_READY`
   - `REJECTED` -> `REJECTED`
+
+Source handling:
+
+- `source=Archive-Nexus` uses direct mapping as implemented in existing rules.
+- `source=Archive-Logitics` uses the logistics mapping above and is included in source-level reconciliation (`logisticsTransactionCount`).
