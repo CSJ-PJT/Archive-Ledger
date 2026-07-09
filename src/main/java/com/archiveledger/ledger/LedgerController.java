@@ -29,19 +29,30 @@ public class LedgerController {
         return ledger.ingestBulk(requests);
     }
 
+    @PostMapping("/events/logistics")
+    EventIngestionResponse ingestLogistics(@Valid @RequestBody NexusEventRequest request) {
+        return ledger.ingestLogistics(request);
+    }
+
+    @PostMapping("/events/logistics/bulk")
+    BulkIngestionResponse ingestLogisticsBulk(@Valid @RequestBody LogisticsBulkRequest request) {
+        return ledger.ingestLogisticsBulk(request);
+    }
+
     @GetMapping("/events/received")
-    List<ReceivedEventView> received() {
-        return ledger.receivedEvents();
+    List<ReceivedEventView> receivedEvents(@RequestParam(required = false) String source) {
+        return ledger.receivedEvents(source);
     }
 
     @GetMapping("/events/received/{eventId}")
-    ResponseEntity<ReceivedEventView> received(@PathVariable String eventId) {
+    ResponseEntity<ReceivedEventView> receivedEvent(@PathVariable String eventId) {
         return ResponseEntity.of(ledger.receivedEvent(eventId));
     }
 
     @GetMapping("/transactions")
-    List<TransactionView> transactions(@RequestParam(required = false) String status) {
-        return ledger.transactions(status);
+    List<TransactionView> transactions(@RequestParam(required = false) String status,
+                                      @RequestParam(required = false) String source) {
+        return ledger.transactions(status, source);
     }
 
     @GetMapping("/transactions/{transactionId}")
@@ -57,8 +68,9 @@ public class LedgerController {
     @GetMapping("/ledger/summary")
     LedgerSummary ledgerSummary(
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate date,
-            @RequestParam(required = false) String factoryId) {
-        return ledger.ledgerSummary(date, factoryId);
+            @RequestParam(required = false) String factoryId,
+            @RequestParam(required = false) String source) {
+        return ledger.ledgerSummary(date, factoryId, source);
     }
 
     @PostMapping("/settlements/daily/run")
@@ -92,8 +104,8 @@ public class LedgerController {
     }
 
     @GetMapping("/reconciliation/summary")
-    OperationsSummary reconciliationSummary() {
-        return ledger.operationsSummary();
+    ReconciliationView reconciliationSummary() {
+        return ledger.reconciliationSummary();
     }
 
     @PostMapping("/approvals/callback")

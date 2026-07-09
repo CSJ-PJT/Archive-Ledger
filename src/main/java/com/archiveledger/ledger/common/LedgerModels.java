@@ -26,7 +26,13 @@ public final class LedgerModels {
     ) {
     }
 
-    public record EventIngestionResponse(String eventId, String status, String transactionId, String message) {
+    public record LogisticsBulkRequest(
+            String source,
+            @NotNull List<NexusEventRequest> events
+    ) {
+    }
+
+    public record EventIngestionResponse(String eventId, String status, String transactionId, boolean duplicate, String message) {
     }
 
     public record ApprovalCallbackRequest(
@@ -67,13 +73,18 @@ public final class LedgerModels {
     }
 
     public record ReconciliationView(LocalDate date, int nexusEvents, int receivedEvents, int createdTransactions,
-                                     int duplicates, int failed, int approvalRequired, int settlementReady,
-                                     int settled, int mismatch, String status, Instant createdAt) {
+                                     int logisticsEventCount, int directEventCount, int logisticsTransactionCount,
+                                     int directTransactionCount, int duplicates, int failed, int approvalRequired,
+                                     int settlementReady, int settled, int mismatch, String status, Instant createdAt) {
     }
 
     public record OperationsSummary(String status, long receivedEvents, long transactions, long duplicates,
                                     long approvalRequired, long settled, long failed, Instant lastSettlementAt,
-                                    String lastReconciliationStatus) {
+                                    String lastReconciliationStatus,
+                                    long eventsReceivedFromNexus, long eventsReceivedFromLogitics,
+                                    long logisticsReceivedEvents, long logisticsCostTransactions,
+                                    long urgentDeliveryTransactions, long delayPenaltyTransactions,
+                                    long routeDeviationTransactions, long coldChainRiskTransactions) {
     }
 
     public record BulkIngestionResponse(int received, int accepted, int duplicate, int failed,

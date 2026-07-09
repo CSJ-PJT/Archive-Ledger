@@ -3,7 +3,6 @@ package com.archiveledger.ledger;
 import com.archiveledger.ledger.approval.ArchiveOsApprovalClient;
 import com.archiveledger.ledger.common.LedgerMetrics;
 import com.archiveledger.ledger.common.LedgerModels.*;
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DuplicateKeyException;
@@ -12,10 +11,21 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.sql.Date;
 import java.sql.Timestamp;
-import java.time.*;
-import java.util.*;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneId;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
+import java.util.UUID;
+import java.util.function.Function;
 
 @Service
 public class LedgerService {
@@ -24,8 +34,15 @@ public class LedgerService {
     private final ArchiveOsApprovalClient archiveOs;
     private final LedgerMetrics metrics;
     private final BigDecimal approvalThreshold;
+    private static final String SOURCE_NEXUS = "Archive-Nexus";
+    private static final String SOURCE_LOGITICS = "Archive-Logitics";
+    private static final BigDecimal LOGISTICS_APPROVAL_THRESHOLD = new BigDecimal("300000");
+    private static final int BULK_RESULT_LIMIT = 50;
 
-    public LedgerService(JdbcTemplate jdbc, ObjectMapper mapper, ArchiveOsApprovalClient archiveOs, LedgerMetrics metrics,
+    public LedgerService(JdbcTemplate jdbc,
+                         ObjectMapper mapper,
+                         ArchiveOsApprovalClient archiveOs,
+                         LedgerMetrics metrics,
                          @Value("${archive-ledger.policy.approval-threshold-krw:3000000}") BigDecimal approvalThreshold) {
         this.jdbc = jdbc;
         this.mapper = mapper;
@@ -36,36 +53,122 @@ public class LedgerService {
 
     @Transactional
     public EventIngestionResponse ingest(NexusEventRequest request) {
-        if (exists("select count(*) from received_event where event_id=? or idempotency_key=?",
-                request.eventId(), request.idempotencyKey())) {
-            metrics.duplicateEvent();
-            audit(request.eventId(), "Archive-Ledger", "DUPLICATE_EVENT", "received_event", request.eventId(), null, "DUPLICATE",
-                    Map.of("idempotencyKey", request.idempotencyKey()));
-            return new EventIngestionResponse(request.eventId(), "DUPLICATE", null, "Duplicate event ignored safely.");
+        return ingestWithSource(withSourceFallback(request, SOURCE_NEXUS));
+    }
+
+    @Transactional
+    public EventIngestionResponse ingestLogistics(NexusEventRequest request) {
+        return ingestWithSource(withSourceFallback(request, SOURCE_LOGITICS));
+    }
+
+    public BulkIngestionResponse ingestBulk(List<NexusEventRequest> requests) {
+        return ingestBulkInternal(
+                requests == null ? List.of() : requests,
+                req -> withSourceFallback(req, SOURCE_NEXUS)
+        );
+    }
+
+    public BulkIngestionResponse ingestLogisticsBulk(LogisticsBulkRequest request) {
+        String source = value(request == null ? null : request.source(), SOURCE_LOGITICS);
+        List<NexusEventRequest> events = request == null || request.events() == null
+                ? List.of()
+                : request.events().stream().map(event -> withSourceFallback(event, source)).toList();
+        return ingestBulkInternal(events, Function.identity());
+    }
+
+    private BulkIngestionResponse ingestBulkInternal(List<NexusEventRequest> requests, Function<NexusEventRequest, NexusEventRequest> normalizer) {
+        List<EventIngestionResponse> results = requests.stream()
+                .map(normalizer)
+                .map(this::ingestWithSource)
+                .toList();
+        int accepted = (int) results.stream().filter(r -> "ACCEPTED".equals(r.status())).count();
+        int duplicate = (int) results.stream().filter(r -> r.duplicate()).count();
+        int failed = (int) results.stream().filter(r -> "FAILED".equals(r.status())).count();
+        List<EventIngestionResponse> limited = results.size() > BULK_RESULT_LIMIT ? results.subList(0, BULK_RESULT_LIMIT) : results;
+        return new BulkIngestionResponse(requests.size(), accepted, duplicate, failed, limited);
+    }
+
+    private EventIngestionResponse ingestWithSource(NexusEventRequest request) {
+        if (request == null) {
+            throw new IllegalArgumentException("Request is required.");
         }
+        if (request.eventId() == null || request.eventId().isBlank()) {
+            throw new IllegalArgumentException("eventId is required.");
+        }
+        if (request.idempotencyKey() == null || request.idempotencyKey().isBlank()) {
+            throw new IllegalArgumentException("idempotencyKey is required.");
+        }
+
+        String source = value(request.source(), SOURCE_NEXUS);
+
+        if (exists("select count(*) from received_event where event_id=? or idempotency_key=?", request.eventId(), request.idempotencyKey())) {
+            metrics.duplicateEvent();
+            audit(request.eventId(), "Archive-Ledger", "DUPLICATE_EVENT", "received_event", request.eventId(),
+                    "RECEIVED", "DUPLICATE",
+                    Map.of("idempotencyKey", request.idempotencyKey(), "source", source));
+            return new EventIngestionResponse(request.eventId(), "DUPLICATE", null, true, "Duplicate event ignored safely.");
+        }
+
         Instant receivedAt = Instant.now();
+        String transactionId = "TX-" + LocalDate.now().toString().replace("-", "") + "-" + UUID.randomUUID().toString().substring(0, 10).toUpperCase(Locale.ROOT);
+        String approvalRequestId = null;
+        String status = "FAILED";
+        Normalized normalized = null;
+
         try {
             jdbc.update("""
-                    insert into received_event(event_id,idempotency_key,source,event_type,schema_version,payload,processing_status,received_at)
-                    values(?,?,?,?,?,?,?,?)
-                    """, request.eventId(), request.idempotencyKey(), value(request.source(), "Archive-Nexus"),
-                    request.eventType(), request.schemaVersion() == null ? 1 : request.schemaVersion(),
-                    write(request.payload()), "RECEIVED", ts(receivedAt));
+                    insert into received_event(event_id,idempotency_key,source,source_service,event_type,schema_version,payload,processing_status,received_at)
+                    values(?,?,?,?,?,?,?,?,?)
+                    """,
+                    request.eventId(),
+                    request.idempotencyKey(),
+                    source,
+                    source,
+                    request.eventType(),
+                    request.schemaVersion() == null ? 1 : request.schemaVersion(),
+                    write(request.payload()),
+                    "RECEIVED",
+                    ts(receivedAt)
+            );
             metrics.eventReceived();
 
-            Normalized normalized = normalize(request);
-            String transactionId = "TX-" + LocalDate.now().toString().replace("-", "") + "-" + UUID.randomUUID().toString().substring(0, 10).toUpperCase();
-            String approvalRequestId = normalized.approvalRequired()
-                    ? "APR-" + LocalDate.now().toString().replace("-", "") + "-" + UUID.randomUUID().toString().substring(0, 10).toUpperCase()
-                    : null;
+            normalized = normalize(request, source);
+            status = normalized.approvalRequired() ? "APPROVAL_REQUIRED" : "SETTLEMENT_READY";
+            if (normalized.approvalRequired()) {
+                approvalRequestId = "APR-" + LocalDate.now().toString().replace("-", "") + "-" + UUID.randomUUID().toString().substring(0, 10).toUpperCase(Locale.ROOT);
+            }
+
             jdbc.update("""
-                    insert into finance_transaction(transaction_id,source_event_id,idempotency_key,transaction_type,factory_id,vendor_id,
-                    synthetic_account_id,amount,currency,status,approval_required,approval_request_id,reason,occurred_at,created_at,updated_at)
-                    values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                    """, transactionId, request.eventId(), request.idempotencyKey(), normalized.transactionType(),
-                    normalized.factoryId(), normalized.vendorId(), normalized.syntheticAccountId(), normalized.amount(),
-                    normalized.currency(), normalized.status(), normalized.approvalRequired(), approvalRequestId,
-                    normalized.reason(), ts(normalized.occurredAt()), ts(receivedAt), ts(receivedAt));
+                    insert into finance_transaction(
+                        transaction_id,source_event_id,idempotency_key,source_service,transaction_type,
+                        factory_id,vendor_id,route_plan_id,shipment_id,origin_code,destination_code,risk_score,approval_reason,
+                        synthetic_account_id,amount,currency,status,approval_required,approval_request_id,reason,occurred_at,created_at,updated_at
+                    ) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    transactionId,
+                    request.eventId(),
+                    request.idempotencyKey(),
+                    source,
+                    normalized.transactionType(),
+                    normalized.factoryId(),
+                    normalized.vendorId(),
+                    normalized.routePlanId(),
+                    normalized.shipmentId(),
+                    normalized.originCode(),
+                    normalized.destinationCode(),
+                    normalized.riskScore(),
+                    normalized.approvalReason(),
+                    normalized.syntheticAccountId(),
+                    normalized.amount(),
+                    normalized.currency(),
+                    status,
+                    normalized.approvalRequired(),
+                    approvalRequestId,
+                    normalized.reason(),
+                    ts(normalized.occurredAt()),
+                    ts(receivedAt),
+                    ts(receivedAt)
+            );
             metrics.transactionCreated();
 
             createLedgerEntries(transactionId, normalized, receivedAt);
@@ -75,46 +178,61 @@ public class LedgerService {
                 jdbc.update("""
                         insert into approval_request(approval_request_id,transaction_id,requested_to,status,amount,reason,policy_evidence,requested_at)
                         values(?,?,?,?,?,?,?,?)
-                        """, approvalRequestId, transactionId, "synthetic-finance-operator", "REQUESTED",
-                        normalized.amount(), normalized.reason(), evidence, ts(receivedAt));
+                        """,
+                        approvalRequestId,
+                        transactionId,
+                        "synthetic-finance-operator",
+                        "REQUESTED",
+                        normalized.amount(),
+                        normalized.reason(),
+                        evidence,
+                        ts(receivedAt)
+                );
+
                 try {
+                    Map<String, Object> metadata = new HashMap<>();
+                    metadata.put("sourceService", source);
+                    metadata.put("routePlanId", normalized.routePlanId());
+                    metadata.put("shipmentId", normalized.shipmentId());
+                    metadata.put("factoryId", normalized.factoryId());
+                    metadata.put("vendorId", normalized.vendorId());
+                    metadata.put("eventType", normalized.eventType());
+                    metadata.put("riskScore", normalized.riskScore());
+                    metadata.put("totalCost", normalized.amount());
+                    metadata.put("requiresColdChain", normalized.requiresColdChain());
                     archiveOs.requestApproval(approvalRequestId, transactionId, normalized.amount(), normalized.currency(),
-                            normalized.reason(), Map.of("factoryId", normalized.factoryId(), "vendorId", normalized.vendorId(),
-                                    "eventType", request.eventType(), "synthetic", true));
+                            normalized.reason(), metadata);
                     audit(transactionId, "Archive-Ledger", "ARCHIVEOS_APPROVAL_REQUESTED", "approval_request",
-                            approvalRequestId, null, "REQUESTED", Map.of("archiveOsEnabled", archiveOs.enabled()));
+                            approvalRequestId, null, "REQUESTED",
+                            Map.of("archiveOsEnabled", archiveOs.enabled(), "sourceService", source));
                 } catch (RuntimeException error) {
                     audit(transactionId, "Archive-Ledger", "ARCHIVEOS_APPROVAL_DEGRADED", "approval_request",
-                            approvalRequestId, null, "REQUESTED", Map.of("error", error.getMessage(), "fallbackEvidence", evidence));
+                            approvalRequestId, "REQUESTED", "REQUESTED", Map.of("error", error.getMessage(), "fallbackEvidence", evidence));
                 }
             }
-            jdbc.update("update received_event set processing_status='PROCESSED', processed_at=? where event_id=?",
-                    ts(Instant.now()), request.eventId());
+
+            jdbc.update("update received_event set processing_status='PROCESSED', processed_at=? where event_id=?", ts(Instant.now()), request.eventId());
             audit(request.eventId(), "Archive-Ledger", "EVENT_PROCESSED", "received_event", request.eventId(),
                     "RECEIVED", "PROCESSED", Map.of("transactionId", transactionId));
             audit(transactionId, "Archive-Ledger", "TRANSACTION_CREATED", "finance_transaction", transactionId,
-                    null, normalized.status(), Map.of("sourceEventId", request.eventId(), "eventType", request.eventType()));
-            return new EventIngestionResponse(request.eventId(), "ACCEPTED", transactionId, "Synthetic event normalized.");
+                    null, status, Map.of("sourceEventId", request.eventId(), "eventType", request.eventType(), "sourceService", source));
+            return new EventIngestionResponse(request.eventId(), "ACCEPTED", transactionId, false, "Synthetic event normalized.");
         } catch (DuplicateKeyException duplicate) {
             metrics.duplicateEvent();
-            return new EventIngestionResponse(request.eventId(), "DUPLICATE", null, "Duplicate event ignored safely.");
+            return new EventIngestionResponse(request.eventId(), "DUPLICATE", null, true, "Duplicate event ignored safely.");
         } catch (RuntimeException error) {
             metrics.processingFailure();
             String reason = error.getMessage() == null ? error.getClass().getSimpleName() : error.getMessage();
             jdbc.update("update received_event set processing_status='FAILED', failure_reason=?, processed_at=? where event_id=?",
                     reason, ts(Instant.now()), request.eventId());
             audit(request.eventId(), "Archive-Ledger", "EVENT_PROCESSING_FAILED", "received_event", request.eventId(),
-                    "RECEIVED", "FAILED", Map.of("error", reason));
-            return new EventIngestionResponse(request.eventId(), "FAILED", null, reason);
+                    "RECEIVED", "FAILED", Map.of("error", reason, "source", source));
+            if (status.equals("FAILED") && normalized != null) {
+                audit(transactionId, "Archive-Ledger", "TRANSACTION_FAILED", "finance_transaction", transactionId,
+                        status, "FAILED", Map.of("error", reason, "source", source));
+            }
+            return new EventIngestionResponse(request.eventId(), "FAILED", transactionId, false, reason);
         }
-    }
-
-    public BulkIngestionResponse ingestBulk(List<NexusEventRequest> requests) {
-        List<EventIngestionResponse> results = requests.stream().map(this::ingest).toList();
-        int accepted = (int) results.stream().filter(r -> "ACCEPTED".equals(r.status())).count();
-        int duplicate = (int) results.stream().filter(r -> "DUPLICATE".equals(r.status())).count();
-        int failed = (int) results.stream().filter(r -> "FAILED".equals(r.status())).count();
-        return new BulkIngestionResponse(requests.size(), accepted, duplicate, failed, results.size() > 50 ? results.subList(0, 50) : results);
     }
 
     @Transactional
@@ -122,9 +240,17 @@ public class LedgerService {
         String next = "APPROVED".equalsIgnoreCase(request.decision()) ? "SETTLEMENT_READY" : "REJECTED";
         String before = jdbc.queryForObject("select status from finance_transaction where transaction_id=?", String.class, request.transactionId());
         jdbc.update("update finance_transaction set status=?, updated_at=? where transaction_id=?", next, ts(Instant.now()), request.transactionId());
-        jdbc.update("update approval_request set status=?, decided_at=?, decided_by=? where approval_request_id=? or transaction_id=?",
-                "APPROVED".equals(next) ? "APPROVED" : request.decision().toUpperCase(Locale.ROOT), ts(Instant.now()),
-                value(request.decidedBy(), "synthetic-operator"), request.approvalRequestId(), request.transactionId());
+        jdbc.update("""
+                update approval_request
+                set status=?, decided_at=?, decided_by=?
+                where approval_request_id=? or transaction_id=?
+                """,
+                "APPROVED".equals(next) ? "APPROVED" : request.decision().toUpperCase(Locale.ROOT),
+                ts(Instant.now()),
+                value(request.decidedBy(), "synthetic-operator"),
+                request.approvalRequestId(),
+                request.transactionId()
+        );
         audit(request.transactionId(), value(request.decidedBy(), "synthetic-operator"), "APPROVAL_CALLBACK",
                 "finance_transaction", request.transactionId(), before, next, Map.of("comment", value(request.comment(), "")));
         return Map.of("transactionId", request.transactionId(), "previousStatus", before, "status", next);
@@ -133,9 +259,10 @@ public class LedgerService {
     @Transactional
     public SettlementBatchView runSettlement(LocalDate date) {
         Instant started = Instant.now();
-        String batchId = "SET-" + date.toString().replace("-", "") + "-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase();
+        String batchId = "SET-" + date.toString().replace("-", "") + "-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase(Locale.ROOT);
         jdbc.update("insert into settlement_batch(batch_id,settlement_date,status,total_transaction_count,total_amount,started_at) values(?,?,?,?,?,?)",
                 batchId, Date.valueOf(date), "RUNNING", 0, BigDecimal.ZERO, ts(started));
+
         try {
             List<TransactionView> candidates = transactionsByStatus("SETTLEMENT_READY").stream()
                     .filter(tx -> LocalDate.ofInstant(tx.occurredAt(), ZoneId.systemDefault()).equals(date))
@@ -146,16 +273,16 @@ public class LedgerService {
                 jdbc.update("""
                         insert into settlement_detail(batch_id,transaction_id,factory_id,vendor_id,account_code,amount,status,created_at)
                         values(?,?,?,?,?,?,?,?)
-                        """, batchId, tx.transactionId(), tx.factoryId(), tx.vendorId(), settlementAccount(tx.transactionType()),
+                        """,
+                        batchId, tx.transactionId(), tx.factoryId(), tx.vendorId(),
+                        settlementAccount(tx.transactionType()),
                         tx.amount(), "SETTLED", ts(Instant.now()));
-                jdbc.update("update finance_transaction set status='SETTLED', updated_at=? where transaction_id=?",
-                        ts(Instant.now()), tx.transactionId());
-                audit(tx.transactionId(), "Archive-Ledger", "TRANSACTION_SETTLED", "finance_transaction",
-                        tx.transactionId(), "SETTLEMENT_READY", "SETTLED", Map.of("batchId", batchId));
+                jdbc.update("update finance_transaction set status='SETTLED', updated_at=? where transaction_id=?", ts(Instant.now()), tx.transactionId());
+                audit(tx.transactionId(), "Archive-Ledger", "TRANSACTION_SETTLED", "finance_transaction", tx.transactionId(),
+                        "SETTLEMENT_READY", "SETTLED", Map.of("batchId", batchId));
             }
-            jdbc.update("""
-                    update settlement_batch set status='SUCCESS', total_transaction_count=?, total_amount=?, completed_at=? where batch_id=?
-                    """, candidates.size(), total, ts(Instant.now()), batchId);
+            jdbc.update("update settlement_batch set status='SUCCESS', total_transaction_count=?, total_amount=?, completed_at=? where batch_id=?",
+                    candidates.size(), total, ts(Instant.now()), batchId);
             metrics.settlementCompleted();
             metrics.settlementDuration(Duration.between(started, Instant.now()));
             return settlement(batchId);
@@ -168,39 +295,86 @@ public class LedgerService {
 
     @Transactional
     public ReconciliationView reconcile(LocalDate date) {
-        int received = count("select count(*) from received_event where cast(received_at as date)=?", Date.valueOf(date));
-        int created = count("select count(*) from finance_transaction where cast(created_at as date)=?", Date.valueOf(date));
-        int failed = count("select count(*) from received_event where processing_status='FAILED' and cast(received_at as date)=?", Date.valueOf(date));
-        int approval = count("select count(*) from finance_transaction where status='APPROVAL_REQUIRED'");
-        int ready = count("select count(*) from finance_transaction where status='SETTLEMENT_READY'");
-        int settled = count("select count(*) from finance_transaction where status='SETTLED'");
-        int duplicates = count("select count(*) from audit_log where action='DUPLICATE_EVENT'");
-        int mismatch = Math.max(0, received - created - failed);
+        Date day = Date.valueOf(date);
+        int received = count("select count(*) from received_event where cast(received_at as date)=?", day);
+        int directEvents = count("select count(*) from received_event where cast(received_at as date)=? and coalesce(source_service, source)=?",
+                day, SOURCE_NEXUS);
+        int logisticsEvents = count("select count(*) from received_event where cast(received_at as date)=? and coalesce(source_service, source)=?",
+                day, SOURCE_LOGITICS);
+        int created = count("select count(*) from finance_transaction where cast(created_at as date)=?", day);
+        int directTransactions = count("select count(*) from finance_transaction where cast(created_at as date)=? and coalesce(source_service, 'Archive-Unknown')=?",
+                day, SOURCE_NEXUS);
+        int logisticsTransactions = count("select count(*) from finance_transaction where cast(created_at as date)=? and coalesce(source_service, 'Archive-Unknown')=?",
+                day, SOURCE_LOGITICS);
+        int failed = count("select count(*) from received_event where processing_status='FAILED' and cast(received_at as date)=?", day);
+        int duplicate = count("select count(*) from audit_log where action='DUPLICATE_EVENT' and cast(created_at as date)=?", day);
+        int approval = count("select count(*) from finance_transaction where status='APPROVAL_REQUIRED' and cast(created_at as date)=?", day);
+        int ready = count("select count(*) from finance_transaction where status='SETTLEMENT_READY' and cast(created_at as date)=?", day);
+        int settled = count("select count(*) from finance_transaction where status='SETTLED' and cast(created_at as date)=?", day);
+        int mismatch = Math.max(0, received + duplicate - created - failed);
         String status = mismatch == 0 ? "OK" : failed > 0 ? "WARNING" : "CRITICAL";
+
         jdbc.update("""
-                insert into reconciliation_result(reconciliation_date,nexus_event_count,received_event_count,created_transaction_count,
-                duplicate_event_count,failed_event_count,approval_required_count,settlement_ready_count,settled_count,mismatch_count,status,created_at)
-                values(?,?,?,?,?,?,?,?,?,?,?,?)
-                """, Date.valueOf(date), received + duplicates, received, created, duplicates, failed, approval, ready, settled, mismatch,
-                status, ts(Instant.now()));
+                insert into reconciliation_result(
+                    reconciliation_date,nexus_event_count,received_event_count,created_transaction_count,
+                    duplicate_event_count,failed_event_count,approval_required_count,settlement_ready_count,settled_count,mismatch_count,
+                    status,created_at,logistics_event_count,direct_event_count,logistics_transaction_count,direct_transaction_count
+                ) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                day,
+                directEvents,
+                received,
+                created,
+                duplicate,
+                failed,
+                approval,
+                ready,
+                settled,
+                mismatch,
+                status,
+                ts(Instant.now()),
+                logisticsEvents,
+                directEvents,
+                logisticsTransactions,
+                directTransactions
+        );
         metrics.reconciliationMismatch(mismatch);
         return reconciliation(date);
     }
 
     public List<ReceivedEventView> receivedEvents() {
-        return jdbc.query("select * from received_event order by received_at desc limit 500", (rs, row) ->
-                new ReceivedEventView(rs.getString("event_id"), rs.getString("idempotency_key"), rs.getString("source"),
-                        rs.getString("event_type"), rs.getString("processing_status"), instant(rs.getTimestamp("received_at")),
-                        instant(rs.getTimestamp("processed_at")), rs.getString("failure_reason")));
+        return receivedEvents(null);
+    }
+
+    public List<ReceivedEventView> receivedEvents(String source) {
+        return source == null || source.isBlank()
+                ? jdbc.query("select * from received_event order by received_at desc limit 500", this::receivedEventRow)
+                : jdbc.query("select * from received_event where coalesce(source_service, source)=? order by received_at desc limit 500",
+                this::receivedEventRow, source);
     }
 
     public Optional<ReceivedEventView> receivedEvent(String eventId) {
-        return receivedEvents().stream().filter(event -> event.eventId().equals(eventId)).findFirst();
+        List<ReceivedEventView> values = jdbc.query("select * from received_event where event_id=?", this::receivedEventRow, eventId);
+        return values.stream().findFirst();
+    }
+
+    public List<TransactionView> transactions(String status, String source) {
+        StringBuilder sql = new StringBuilder("select * from finance_transaction where 1=1");
+        List<Object> args = new ArrayList<>();
+        if (status != null && !status.isBlank()) {
+            sql.append(" and status=?");
+            args.add(status);
+        }
+        if (source != null && !source.isBlank()) {
+            sql.append(" and coalesce(source_service, 'Archive-Unknown')=?");
+            args.add(source);
+        }
+        sql.append(" order by created_at desc limit 500");
+        return jdbc.query(sql.toString(), this::transactionRow, args.toArray());
     }
 
     public List<TransactionView> transactions(String status) {
-        return status == null || status.isBlank() ? jdbc.query("select * from finance_transaction order by created_at desc limit 500", this::transactionRow)
-                : transactionsByStatus(status);
+        return transactions(status, null);
     }
 
     public Optional<TransactionView> transaction(String id) {
@@ -209,21 +383,37 @@ public class LedgerService {
     }
 
     public List<LedgerEntryView> ledgerEntries(String transactionId) {
-        String sql = transactionId == null || transactionId.isBlank()
+        String sql = (transactionId == null || transactionId.isBlank())
                 ? "select * from ledger_entry order by created_at desc limit 500"
                 : "select * from ledger_entry where transaction_id=? order by id";
-        Object[] args = transactionId == null || transactionId.isBlank() ? new Object[]{} : new Object[]{transactionId};
+        Object[] args = (transactionId == null || transactionId.isBlank()) ? new Object[]{} : new Object[]{transactionId};
         return jdbc.query(sql, this::ledgerRow, args);
     }
 
-    public LedgerSummary ledgerSummary(LocalDate date, String factoryId) {
-        String clause = date != null ? "cast(occurred_at as date)=?" : factoryId != null ? "factory_id=?" : "1=1";
-        Object arg = date != null ? Date.valueOf(date) : factoryId;
-        List<LedgerEntryView> rows = arg == null ? jdbc.query("select * from ledger_entry where " + clause, this::ledgerRow)
-                : jdbc.query("select * from ledger_entry where " + clause, this::ledgerRow, arg);
+    public LedgerSummary ledgerSummary(LocalDate date, String factoryId, String source) {
+        StringBuilder sql = new StringBuilder("select le.* from ledger_entry le join finance_transaction ft on ft.transaction_id=le.transaction_id where 1=1");
+        List<Object> args = new ArrayList<>();
+        if (date != null) {
+            sql.append(" and cast(le.occurred_at as date)=?");
+            args.add(Date.valueOf(date));
+        }
+        if (factoryId != null && !factoryId.isBlank()) {
+            sql.append(" and le.factory_id=?");
+            args.add(factoryId);
+        }
+        if (source != null && !source.isBlank()) {
+            sql.append(" and coalesce(ft.source_service, 'Archive-Unknown')=?");
+            args.add(source);
+        }
+        sql.append(" order by le.created_at desc");
+        List<LedgerEntryView> rows = jdbc.query(sql.toString(), this::ledgerRow, args.toArray());
         BigDecimal debit = rows.stream().map(LedgerEntryView::debitAmount).reduce(BigDecimal.ZERO, BigDecimal::add);
         BigDecimal credit = rows.stream().map(LedgerEntryView::creditAmount).reduce(BigDecimal.ZERO, BigDecimal::add);
-        return new LedgerSummary(date != null ? date.toString() : value(factoryId, "all"), debit, credit, rows.size());
+        String scope = date != null ? date.toString() : value(factoryId, "all");
+        if (source != null && !source.isBlank()) {
+            scope = scope + "|" + source;
+        }
+        return new LedgerSummary(scope, debit, credit, rows.size());
     }
 
     public List<SettlementBatchView> settlements() {
@@ -235,10 +425,17 @@ public class LedgerService {
     }
 
     public List<SettlementDetailView> settlementDetails(String batchId) {
-        return jdbc.query("select * from settlement_detail where batch_id=? order by id", (rs, row) ->
-                new SettlementDetailView(rs.getString("batch_id"), rs.getString("transaction_id"), rs.getString("factory_id"),
-                        rs.getString("vendor_id"), rs.getString("account_code"), rs.getBigDecimal("amount"),
-                        rs.getString("status"), instant(rs.getTimestamp("created_at"))), batchId);
+        return jdbc.query("select * from settlement_detail where batch_id=? order by id",
+                (rs, row) -> new SettlementDetailView(
+                        rs.getString("batch_id"),
+                        rs.getString("transaction_id"),
+                        rs.getString("factory_id"),
+                        rs.getString("vendor_id"),
+                        rs.getString("account_code"),
+                        rs.getBigDecimal("amount"),
+                        rs.getString("status"),
+                        instant(rs.getTimestamp("created_at"))
+                ), batchId);
     }
 
     public ReconciliationView reconciliation(LocalDate date) {
@@ -247,23 +444,167 @@ public class LedgerService {
         return rows.isEmpty() ? reconcile(date) : rows.get(0);
     }
 
+    public ReconciliationView reconciliationSummary() {
+        List<ReconciliationView> rows = jdbc.query("select * from reconciliation_result order by created_at desc limit 1",
+                this::reconciliationRow);
+        return rows.isEmpty() ? reconcile(LocalDate.now()) : rows.get(0);
+    }
+
     public OperationsSummary operationsSummary() {
         String lastStatus = jdbc.query("select status from reconciliation_result order by created_at desc limit 1",
                 rs -> rs.next() ? rs.getString(1) : "UNKNOWN");
         Instant lastSettlement = jdbc.query("select completed_at from settlement_batch where completed_at is not null order by completed_at desc limit 1",
                 rs -> rs.next() ? instant(rs.getTimestamp(1)) : null);
         long failed = count("select count(*) from received_event where processing_status='FAILED'");
-        return new OperationsSummary(failed > 0 ? "DEGRADED" : "HEALTHY",
-                count("select count(*) from received_event"), count("select count(*) from finance_transaction"),
-                count("select count(*) from audit_log where action='DUPLICATE_EVENT'"),
-                count("select count(*) from finance_transaction where status='APPROVAL_REQUIRED'"),
-                count("select count(*) from finance_transaction where status='SETTLED'"), failed, lastSettlement, lastStatus);
+        long received = count("select count(*) from received_event");
+        long transactionCount = count("select count(*) from finance_transaction");
+        long duplicates = count("select count(*) from audit_log where action='DUPLICATE_EVENT'");
+        long approvalRequired = count("select count(*) from finance_transaction where status='APPROVAL_REQUIRED'");
+        long settled = count("select count(*) from finance_transaction where status='SETTLED'");
+        long eventsFromNexus = count("select count(*) from received_event where coalesce(source_service, source)=?", SOURCE_NEXUS);
+        long eventsFromLogitics = count("select count(*) from received_event where coalesce(source_service, source)=?", SOURCE_LOGITICS);
+        long logisticsReceived = count("select count(*) from received_event where coalesce(source_service, source)=?", SOURCE_LOGITICS);
+        long logisticsCostTransactions = count("select count(*) from finance_transaction where transaction_type='LOGISTICS_COST' and coalesce(source_service, 'Archive-Unknown')=?",
+                SOURCE_LOGITICS);
+        long urgentDeliveryTransactions = count("select count(*) from finance_transaction where transaction_type='URGENT_DELIVERY_COST' and coalesce(source_service, 'Archive-Unknown')=?",
+                SOURCE_LOGITICS);
+        long delayPenaltyTransactions = count("select count(*) from finance_transaction where transaction_type='DELAY_PENALTY' and coalesce(source_service, 'Archive-Unknown')=?",
+                SOURCE_LOGITICS);
+        long routeDeviationTransactions = count("select count(*) from finance_transaction where transaction_type='ROUTE_DEVIATION_COST' and coalesce(source_service, 'Archive-Unknown')=?",
+                SOURCE_LOGITICS);
+        long coldChainRiskTransactions = count("select count(*) from finance_transaction where transaction_type='COLD_CHAIN_RISK_COST' and coalesce(source_service, 'Archive-Unknown')=?",
+                SOURCE_LOGITICS);
+        String status = failed > 0 ? "DEGRADED" : "HEALTHY";
+        return new OperationsSummary(
+                status,
+                received,
+                transactionCount,
+                duplicates,
+                approvalRequired,
+                settled,
+                failed,
+                lastSettlement,
+                lastStatus,
+                eventsFromNexus,
+                eventsFromLogitics,
+                logisticsReceived,
+                logisticsCostTransactions,
+                urgentDeliveryTransactions,
+                delayPenaltyTransactions,
+                routeDeviationTransactions,
+                coldChainRiskTransactions
+        );
     }
 
-    private Normalized normalize(NexusEventRequest request) {
-        Map<String, Object> p = request.payload();
-        String eventType = request.eventType();
-        String transactionType = switch (eventType) {
+    private Normalized normalize(NexusEventRequest request, String source) {
+        if (isLogisticsRequest(request, source)) {
+            return normalizeLogistics(request, source);
+        }
+        return normalizeDirect(request, source);
+    }
+
+    private boolean isLogisticsRequest(NexusEventRequest request, String source) {
+        return SOURCE_LOGITICS.equals(source) && (
+                "LOGISTICS_DISPATCHED".equals(request.eventType()) ||
+                        "LOGISTICS_COST_CONFIRMED".equals(request.eventType()) ||
+                        "URGENT_DELIVERY_COST_CONFIRMED".equals(request.eventType()) ||
+                        "DELAY_PENALTY_CONFIRMED".equals(request.eventType()) ||
+                        "ROUTE_DEVIATION_COST_CONFIRMED".equals(request.eventType()) ||
+                        "COLD_CHAIN_RISK_COST_CONFIRMED".equals(request.eventType())
+        );
+    }
+
+    private Normalized normalizeLogistics(NexusEventRequest request, String source) {
+        Map<String, Object> payload = request.payload();
+        if (payload == null) {
+            throw new IllegalArgumentException("Payload is required.");
+        }
+
+        String transactionType = switch (request.eventType()) {
+            case "LOGISTICS_DISPATCHED", "LOGISTICS_COST_CONFIRMED" -> "LOGISTICS_COST";
+            case "URGENT_DELIVERY_COST_CONFIRMED" -> "URGENT_DELIVERY_COST";
+            case "DELAY_PENALTY_CONFIRMED" -> "DELAY_PENALTY";
+            case "ROUTE_DEVIATION_COST_CONFIRMED" -> "ROUTE_DEVIATION_COST";
+            case "COLD_CHAIN_RISK_COST_CONFIRMED" -> "COLD_CHAIN_RISK_COST";
+            default -> throw new IllegalArgumentException("Unsupported logistics event_type: " + request.eventType());
+        };
+
+        BigDecimal amount = firstNonNull(
+                decimalOrNull(payload.get("totalCost")),
+                decimalOrNull(payload.get("estimatedCost")),
+                decimalOrNull(payload.get("amount"))
+        );
+        if (amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
+            throw new IllegalArgumentException("amount is required for logistics events.");
+        }
+
+        BigDecimal riskScore = decimalOrNull(payload.get("riskScore"), new BigDecimal("0"));
+        BigDecimal coldChainPenalty = decimalOrNull(payload.get("coldChainPenalty"), BigDecimal.ZERO);
+        boolean delayed = bool(payload.get("delayed"), false);
+        boolean requiresColdChain = bool(payload.get("requiresColdChain"), false);
+        boolean requiresApproval = bool(payload.get("requiresApproval"), false);
+        String priority = string(payload, "priority", "NORMAL");
+        String currency = string(payload, "currency", "KRW");
+        boolean approvalRequired = requiresApproval
+                || amount.compareTo(LOGISTICS_APPROVAL_THRESHOLD) >= 0
+                || riskScore.compareTo(new BigDecimal("0.85")) >= 0
+                || "COLD_CHAIN_RISK_COST_CONFIRMED".equals(request.eventType())
+                || ("URGENT_DELIVERY_COST_CONFIRMED".equals(request.eventType()) && amount.compareTo(LOGISTICS_APPROVAL_THRESHOLD) >= 0)
+                || coldChainPenalty.compareTo(BigDecimal.ZERO) > 0
+                || (delayed && requiresColdChain)
+                || "CRITICAL".equalsIgnoreCase(priority);
+
+        String reason = string(payload, "reason", "Synthetic logistics cost confirmed by Archive-Logitics");
+        String approvalReason = buildLogisticsApprovalReason(approvalRequired, request.eventType(), amount, riskScore,
+                coldChainPenalty, delayed, requiresColdChain, "CRITICAL".equalsIgnoreCase(priority));
+
+        return new Normalized(
+                transactionType,
+                string(payload, "factoryId", null),
+                string(payload, "vendorId", null),
+                string(payload, "syntheticAccountId", null),
+                string(payload, "routePlanId", null),
+                string(payload, "shipmentId", null),
+                string(payload, "originCode", null),
+                string(payload, "destinationCode", null),
+                riskScore,
+                approvalReason,
+                approvalRequired,
+                approvalRequired ? "APPROVAL_REQUIRED" : "SETTLEMENT_READY",
+                reason,
+                request.occurredAt() == null ? Instant.now() : request.occurredAt(),
+                source,
+                request.eventType(),
+                priority,
+                requiresColdChain,
+                amount.setScale(2, RoundingMode.HALF_UP),
+                currency
+        );
+    }
+
+    private String buildLogisticsApprovalReason(boolean approvalRequired, String eventType, BigDecimal amount, BigDecimal riskScore,
+                                                BigDecimal coldChainPenalty, boolean delayed, boolean requiresColdChain, boolean critical) {
+        if (!approvalRequired) {
+            return "LOGISTICS cost event accepted.";
+        }
+        List<String> reasons = new ArrayList<>();
+        if (amount.compareTo(LOGISTICS_APPROVAL_THRESHOLD) >= 0) reasons.add("totalCost>=300000");
+        if (riskScore.compareTo(new BigDecimal("0.85")) >= 0) reasons.add("riskScore>=0.85");
+        if ("COLD_CHAIN_RISK_COST_CONFIRMED".equals(eventType)) reasons.add("cold_chain_risk");
+        if ("URGENT_DELIVERY_COST_CONFIRMED".equals(eventType) && amount.compareTo(LOGISTICS_APPROVAL_THRESHOLD) >= 0)
+            reasons.add("urgent_delivery_high_cost");
+        if (coldChainPenalty.compareTo(BigDecimal.ZERO) > 0) reasons.add("coldChainPenalty>0");
+        if (delayed && requiresColdChain) reasons.add("delayed_and_cold_chain");
+        if (critical) reasons.add("priority=CRITICAL");
+        return "Approval required: " + String.join(",", reasons);
+    }
+
+    private Normalized normalizeDirect(NexusEventRequest request, String source) {
+        Map<String, Object> payload = request.payload();
+        if (payload == null) {
+            throw new IllegalArgumentException("Payload is required.");
+        }
+        String transactionType = switch (request.eventType()) {
             case "MAINTENANCE_COMPLETED" -> "MAINTENANCE_EXPENSE";
             case "QUALITY_DEFECT_DETECTED" -> "QUALITY_LOSS";
             case "LOGISTICS_DISPATCHED" -> "LOGISTICS_COST";
@@ -274,45 +615,84 @@ public class LedgerService {
             case "QUALITY_CLAIM_CHARGED" -> "QUALITY_CLAIM_CHARGEBACK";
             case "SHIPMENT_HOLD_CREATED" -> "SHIPMENT_HOLD_COST";
             case "PRODUCTION_COMPLETED" -> "PRODUCTION_COST";
-            default -> throw new IllegalArgumentException("Unsupported event_type: " + eventType);
+            default -> throw new IllegalArgumentException("Unsupported event_type: " + request.eventType());
         };
-        BigDecimal amount = decimal(firstPresent(p, "estimatedCost", "amount", "cost"));
-        String severity = string(p, "severity", "NORMAL");
+        BigDecimal amount = firstNonNull(
+                decimalOrNull(payload.get("estimatedCost")),
+                decimalOrNull(payload.get("amount")),
+                decimalOrNull(payload.get("cost"))
+        );
+        if (amount == null) {
+            throw new IllegalArgumentException("amount is required for direct events.");
+        }
+        String severity = string(payload, "severity", "NORMAL");
+        boolean requiresApproval = bool(payload.get("requiresApproval"), false);
         boolean approvalRequired = amount.compareTo(approvalThreshold) >= 0
-                || List.of("HIGH", "CRITICAL").contains(severity)
-                || List.of("EMERGENCY_PURCHASE_REQUESTED", "QUALITY_CLAIM_CHARGED").contains(eventType)
-                || List.of("WARNING", "BLOCKED").contains(string(p, "vendorRisk", "NORMAL"))
-                || Boolean.TRUE.equals(p.get("requiresApproval"));
-        return new Normalized(transactionType, string(p, "factoryId", "FAC-SYN"), string(p, "vendorId", "VENDOR-SYN"),
-                string(p, "syntheticAccountId", null), amount, string(p, "currency", "KRW"),
-                approvalRequired ? "APPROVAL_REQUIRED" : "SETTLEMENT_READY", approvalRequired,
-                string(p, "reason", "synthetic finance operation"), request.occurredAt() == null ? Instant.now() : request.occurredAt(),
-                request.eventType(), severity);
+                || "HIGH".equalsIgnoreCase(severity)
+                || "CRITICAL".equalsIgnoreCase(severity)
+                || "EMERGENCY_PURCHASE_REQUESTED".equals(request.eventType())
+                || "QUALITY_CLAIM_CHARGED".equals(request.eventType())
+                || "WARNING".equals(string(payload, "vendorRisk", "NORMAL"))
+                || "BLOCKED".equals(string(payload, "vendorRisk", "NORMAL"))
+                || requiresApproval;
+
+        String reason = string(payload, "reason", "Synthetic finance operation");
+        return new Normalized(
+                transactionType,
+                string(payload, "factoryId", "FAC-SYN"),
+                string(payload, "vendorId", "VENDOR-SYN"),
+                string(payload, "syntheticAccountId", null),
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                approvalRequired,
+                approvalRequired ? "APPROVAL_REQUIRED" : "SETTLEMENT_READY",
+                reason,
+                request.occurredAt() == null ? Instant.now() : request.occurredAt(),
+                source,
+                request.eventType(),
+                severity,
+                false,
+                amount.setScale(2, RoundingMode.HALF_UP),
+                string(payload, "currency", "KRW")
+        );
     }
 
-    private void createLedgerEntries(String transactionId, Normalized n, Instant createdAt) {
-        Account debit = debitAccount(n.transactionType());
-        Account credit = creditAccount(n.transactionType());
-        insertLedger(transactionId, debit.code(), debit.name(), n.amount(), BigDecimal.ZERO, n, createdAt);
-        insertLedger(transactionId, credit.code(), credit.name(), BigDecimal.ZERO, n.amount(), n, createdAt);
+    private void createLedgerEntries(String transactionId, Normalized normalized, Instant createdAt) {
+        Account debit = debitAccount(normalized.transactionType());
+        Account credit = creditAccount(normalized.transactionType());
+        insertLedger(transactionId, debit.code(), debit.name(), normalized.amount(), BigDecimal.ZERO, normalized, createdAt);
+        insertLedger(transactionId, credit.code(), credit.name(), BigDecimal.ZERO, normalized.amount(), normalized, createdAt);
     }
 
-    private void insertLedger(String transactionId, String code, String name, BigDecimal debit, BigDecimal credit, Normalized n, Instant createdAt) {
+    private void insertLedger(String transactionId, String accountCode, String accountName, BigDecimal debit, BigDecimal credit,
+                             Normalized normalized, Instant createdAt) {
         jdbc.update("""
-                insert into ledger_entry(transaction_id,account_code,account_name,debit_amount,credit_amount,factory_id,vendor_id,occurred_at,created_at)
-                values(?,?,?,?,?,?,?,?,?)
-                """, transactionId, code, name, debit, credit, n.factoryId(), n.vendorId(), ts(n.occurredAt()), ts(createdAt));
+                insert into ledger_entry(transaction_id,account_code,account_name,debit_amount,credit_amount,factory_id,vendor_id,
+                                         occurred_at,created_at,source_service)
+                values(?,?,?,?,?,?,?,?,?,?)
+                """,
+                transactionId, accountCode, accountName, debit, credit, normalized.factoryId(), normalized.vendorId(),
+                ts(normalized.occurredAt()), ts(createdAt), normalized.sourceService());
     }
 
     private Account debitAccount(String type) {
         return switch (type) {
+            case "LOGISTICS_COST" -> new Account("LOGISTICS_EXPENSE", "Synthetic Logistics Expense");
+            case "URGENT_DELIVERY_COST" -> new Account("URGENT_DELIVERY_EXPENSE", "Synthetic Urgent Delivery Expense");
+            case "DELAY_PENALTY" -> new Account("DELAY_PENALTY_EXPENSE", "Synthetic Delay Penalty Expense");
+            case "ROUTE_DEVIATION_COST" -> new Account("ROUTE_DEVIATION_EXPENSE", "Synthetic Route Deviation Expense");
+            case "COLD_CHAIN_RISK_COST" -> new Account("COLD_CHAIN_RISK_EXPENSE", "Synthetic Cold Chain Risk Expense");
             case "MAINTENANCE_EXPENSE" -> new Account("MAINTENANCE_EXPENSE", "Synthetic Maintenance Expense");
             case "QUALITY_LOSS", "QUALITY_CLAIM_CHARGEBACK" -> new Account("QUALITY_LOSS", "Synthetic Quality Loss");
-            case "LOGISTICS_COST", "SHIPMENT_HOLD_COST" -> new Account("LOGISTICS_COST", "Synthetic Logistics Cost");
+            case "SHIPMENT_HOLD_COST" -> new Account("LOGISTICS_EXPENSE", "Synthetic Logistics Expense");
             case "MATERIAL_COST" -> new Account("MATERIAL_COST", "Synthetic Material Cost");
             case "CORPORATE_CARD_EXPENSE", "EMERGENCY_PURCHASE_EXPENSE" -> new Account("OPERATING_EXPENSE", "Synthetic Operating Expense");
-            case "VENDOR_PAYMENT" -> new Account("ACCOUNTS_PAYABLE", "Synthetic Accounts Payable");
-            default -> new Account("PRODUCTION_COST", "Synthetic Production Cost");
+            case "VENDOR_PAYMENT", "PRODUCTION_COST" -> new Account(type, "Synthetic " + type);
+            default -> new Account("ACCOUNTS_PAYABLE", "Synthetic Accounts Payable");
         };
     }
 
@@ -324,55 +704,118 @@ public class LedgerService {
         };
     }
 
-    private String fallbackEvidence(Normalized n) {
-        return "Synthetic policy evidence: amount " + n.amount() + " " + n.currency()
-                + ", severity " + n.severity() + ", event " + n.eventType()
-                + ". Policy requires approval when amount >= " + approvalThreshold
-                + " KRW, severity is HIGH/CRITICAL, emergency purchase or quality claim is detected, or vendor risk is elevated.";
-    }
-
     private String settlementAccount(String transactionType) {
         return debitAccount(transactionType).code();
+    }
+
+    private String fallbackEvidence(Normalized normalized) {
+        return "Synthetic policy evidence: amount=" + normalized.amount() + ", source=" + normalized.sourceService()
+                + ", event=" + normalized.eventType() + ", riskScore=" + normalized.riskScore()
+                + ", requiresColdChain=" + normalized.requiresColdChain()
+                + ", severity=" + normalized.severity();
     }
 
     private List<TransactionView> transactionsByStatus(String status) {
         return jdbc.query("select * from finance_transaction where status=? order by created_at desc", this::transactionRow, status);
     }
 
+    private ReceivedEventView receivedEventRow(java.sql.ResultSet rs, int row) throws java.sql.SQLException {
+        return new ReceivedEventView(
+                rs.getString("event_id"),
+                rs.getString("idempotency_key"),
+                rs.getString("source"),
+                rs.getString("event_type"),
+                rs.getString("processing_status"),
+                instant(rs.getTimestamp("received_at")),
+                instant(rs.getTimestamp("processed_at")),
+                rs.getString("failure_reason")
+        );
+    }
+
     private TransactionView transactionRow(java.sql.ResultSet rs, int row) throws java.sql.SQLException {
-        return new TransactionView(rs.getString("transaction_id"), rs.getString("source_event_id"), rs.getString("idempotency_key"),
-                rs.getString("transaction_type"), rs.getString("factory_id"), rs.getString("vendor_id"),
-                rs.getString("synthetic_account_id"), rs.getBigDecimal("amount"), rs.getString("currency"),
-                rs.getString("status"), rs.getBoolean("approval_required"), rs.getString("approval_request_id"),
-                rs.getString("reason"), instant(rs.getTimestamp("occurred_at")), instant(rs.getTimestamp("created_at")),
-                instant(rs.getTimestamp("updated_at")));
+        return new TransactionView(
+                rs.getString("transaction_id"),
+                rs.getString("source_event_id"),
+                rs.getString("idempotency_key"),
+                rs.getString("transaction_type"),
+                rs.getString("factory_id"),
+                rs.getString("vendor_id"),
+                rs.getString("synthetic_account_id"),
+                rs.getBigDecimal("amount"),
+                rs.getString("currency"),
+                rs.getString("status"),
+                rs.getBoolean("approval_required"),
+                rs.getString("approval_request_id"),
+                rs.getString("reason"),
+                instant(rs.getTimestamp("occurred_at")),
+                instant(rs.getTimestamp("created_at")),
+                instant(rs.getTimestamp("updated_at"))
+        );
     }
 
     private LedgerEntryView ledgerRow(java.sql.ResultSet rs, int row) throws java.sql.SQLException {
-        return new LedgerEntryView(rs.getString("transaction_id"), rs.getString("account_code"), rs.getString("account_name"),
-                rs.getBigDecimal("debit_amount"), rs.getBigDecimal("credit_amount"), rs.getString("factory_id"),
-                rs.getString("vendor_id"), instant(rs.getTimestamp("occurred_at")), instant(rs.getTimestamp("created_at")));
+        return new LedgerEntryView(
+                rs.getString("transaction_id"),
+                rs.getString("account_code"),
+                rs.getString("account_name"),
+                rs.getBigDecimal("debit_amount"),
+                rs.getBigDecimal("credit_amount"),
+                rs.getString("factory_id"),
+                rs.getString("vendor_id"),
+                instant(rs.getTimestamp("occurred_at")),
+                instant(rs.getTimestamp("created_at"))
+        );
     }
 
     private SettlementBatchView settlementRow(java.sql.ResultSet rs, int row) throws java.sql.SQLException {
-        return new SettlementBatchView(rs.getString("batch_id"), rs.getDate("settlement_date").toLocalDate(),
-                rs.getString("status"), rs.getInt("total_transaction_count"), rs.getBigDecimal("total_amount"),
-                instant(rs.getTimestamp("started_at")), instant(rs.getTimestamp("completed_at")), rs.getString("failure_reason"));
+        return new SettlementBatchView(
+                rs.getString("batch_id"),
+                rs.getDate("settlement_date").toLocalDate(),
+                rs.getString("status"),
+                rs.getInt("total_transaction_count"),
+                rs.getBigDecimal("total_amount"),
+                instant(rs.getTimestamp("started_at")),
+                instant(rs.getTimestamp("completed_at")),
+                rs.getString("failure_reason")
+        );
     }
 
     private ReconciliationView reconciliationRow(java.sql.ResultSet rs, int row) throws java.sql.SQLException {
-        return new ReconciliationView(rs.getDate("reconciliation_date").toLocalDate(), rs.getInt("nexus_event_count"),
-                rs.getInt("received_event_count"), rs.getInt("created_transaction_count"), rs.getInt("duplicate_event_count"),
-                rs.getInt("failed_event_count"), rs.getInt("approval_required_count"), rs.getInt("settlement_ready_count"),
-                rs.getInt("settled_count"), rs.getInt("mismatch_count"), rs.getString("status"), instant(rs.getTimestamp("created_at")));
+        return new ReconciliationView(
+                rs.getDate("reconciliation_date").toLocalDate(),
+                rs.getInt("nexus_event_count"),
+                rs.getInt("received_event_count"),
+                rs.getInt("created_transaction_count"),
+                rs.getInt("logistics_event_count"),
+                rs.getInt("direct_event_count"),
+                rs.getInt("logistics_transaction_count"),
+                rs.getInt("direct_transaction_count"),
+                rs.getInt("duplicate_event_count"),
+                rs.getInt("failed_event_count"),
+                rs.getInt("approval_required_count"),
+                rs.getInt("settlement_ready_count"),
+                rs.getInt("settled_count"),
+                rs.getInt("mismatch_count"),
+                rs.getString("status"),
+                instant(rs.getTimestamp("created_at"))
+        );
     }
 
-    private void audit(String traceId, String actor, String action, String targetType, String targetId,
-                       String before, String after, Map<String, Object> detail) {
+    private void audit(String traceId, String actor, String action, String targetType, String targetId, String before, String after, Map<String, Object> detail) {
         jdbc.update("""
                 insert into audit_log(trace_id,actor,action,target_type,target_id,before_status,after_status,detail,created_at)
                 values(?,?,?,?,?,?,?,?,?)
-                """, traceId, actor, action, targetType, targetId, before, after, write(detail), ts(Instant.now()));
+                """,
+                traceId,
+                actor,
+                action,
+                targetType,
+                targetId,
+                before,
+                after,
+                write(detail),
+                ts(Instant.now())
+        );
     }
 
     private boolean exists(String sql, Object... args) {
@@ -392,37 +835,104 @@ public class LedgerService {
         }
     }
 
-    private BigDecimal decimal(Object value) {
-        if (value == null) throw new IllegalArgumentException("Payload amount is required.");
-        if (value instanceof Number number) return BigDecimal.valueOf(number.doubleValue());
+    private BigDecimal decimalOrNull(Object value) {
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof BigDecimal decimal) {
+            return decimal;
+        }
+        if (value instanceof Number number) {
+            return BigDecimal.valueOf(number.doubleValue());
+        }
         return new BigDecimal(String.valueOf(value));
     }
 
-    private Object firstPresent(Map<String, Object> payload, String... keys) {
-        for (String key : keys) if (payload.containsKey(key)) return payload.get(key);
+    private BigDecimal decimalOrNull(Object value, BigDecimal fallback) {
+        BigDecimal parsed = decimalOrNull(value);
+        return parsed == null ? fallback : parsed;
+    }
+
+    private BigDecimal firstNonNull(BigDecimal... values) {
+        for (BigDecimal value : values) {
+            if (value != null) {
+                return value;
+            }
+        }
         return null;
     }
 
     private String string(Map<String, Object> payload, String key, String fallback) {
         Object value = payload.get(key);
-        return value == null || String.valueOf(value).isBlank() ? fallback : String.valueOf(value);
+        if (value == null) {
+            return fallback;
+        }
+        String text = String.valueOf(value);
+        return text.isBlank() ? fallback : text;
     }
 
-    private String value(String value, String fallback) {
-        return value == null || value.isBlank() ? fallback : value;
+    private boolean bool(Object value, boolean fallback) {
+        if (value == null) {
+            return fallback;
+        }
+        if (value instanceof Boolean boolValue) {
+            return boolValue;
+        }
+        return Boolean.parseBoolean(String.valueOf(value));
+    }
+
+    private String value(String source, String fallback) {
+        return source == null || source.isBlank() ? fallback : source;
     }
 
     private Timestamp ts(Instant value) {
         return Timestamp.from(value);
     }
 
-    private Instant instant(Timestamp timestamp) {
-        return timestamp == null ? null : timestamp.toInstant();
+    private Instant instant(Timestamp value) {
+        return value == null ? null : value.toInstant();
     }
 
-    private record Normalized(String transactionType, String factoryId, String vendorId, String syntheticAccountId,
-                              BigDecimal amount, String currency, String status, boolean approvalRequired,
-                              String reason, Instant occurredAt, String eventType, String severity) {
+    private NexusEventRequest withSourceFallback(NexusEventRequest request, String defaultSource) {
+        if (request == null) {
+            throw new IllegalArgumentException("Request is required.");
+        }
+        String source = value(request.source(), defaultSource);
+        return new NexusEventRequest(
+                request.eventId(),
+                request.idempotencyKey(),
+                request.eventType(),
+                request.aggregateType(),
+                request.aggregateId(),
+                source,
+                request.schemaVersion(),
+                request.payload(),
+                request.occurredAt()
+        );
+    }
+
+    private record Normalized(
+            String transactionType,
+            String factoryId,
+            String vendorId,
+            String syntheticAccountId,
+            String routePlanId,
+            String shipmentId,
+            String originCode,
+            String destinationCode,
+            BigDecimal riskScore,
+            String approvalReason,
+            boolean approvalRequired,
+            String status,
+            String reason,
+            Instant occurredAt,
+            String sourceService,
+            String eventType,
+            String severity,
+            boolean requiresColdChain,
+            BigDecimal amount,
+            String currency
+    ) {
     }
 
     private record Account(String code, String name) {
