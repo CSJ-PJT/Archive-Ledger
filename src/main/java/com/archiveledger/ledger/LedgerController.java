@@ -78,6 +78,25 @@ public class LedgerController {
         return ledger.runSettlement(date);
     }
 
+    @PostMapping("/batches/daily/run")
+    DailyBatchRunView runDailyBatch(@RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate date,
+                                    @RequestParam(defaultValue = "Archive-Ledger-Operator") String approvedBy,
+                                    @RequestParam(defaultValue = "MANUAL") String triggerType,
+                                    @RequestParam(defaultValue = "true") boolean settlement,
+                                    @RequestParam(defaultValue = "true") boolean reconciliation) {
+        return ledger.runDailyBatch(date, approvedBy, triggerType, settlement, reconciliation);
+    }
+
+    @GetMapping("/batches/daily")
+    List<DailyBatchRunView> dailyBatches() {
+        return ledger.dailyBatches();
+    }
+
+    @GetMapping("/batches/daily/{runId}")
+    ResponseEntity<DailyBatchRunView> dailyBatch(@PathVariable String runId) {
+        return ResponseEntity.of(ledger.dailyBatch(runId));
+    }
+
     @GetMapping("/settlements")
     List<SettlementBatchView> settlements() {
         return ledger.settlements();

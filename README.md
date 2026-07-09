@@ -28,6 +28,8 @@ Archive-Ledger는 Archive-Nexus direct 비용 이벤트와 Archive-Logistics nat
 | GET | `/api/transactions` | 거래 조회, `status`, `source` 필터 지원 |
 | GET | `/api/ledger/entries` | 원장 entry 조회, `transactionId` 필터 지원 |
 | GET | `/api/ledger/summary` | debit/credit 요약, `date`, `factoryId`, `source` 필터 지원 |
+| POST | `/api/batches/daily/run` | 승인자 기준 일정산/대사 통합 배치 실행 |
+| GET | `/api/batches/daily` | 일배치 실행 이력 조회 |
 | POST | `/api/settlements/daily/run` | 일별 정산 실행 |
 | POST | `/api/reconciliation/daily` | 일별 대사 실행 |
 | GET | `/api/reconciliation/summary` | 최신 대사 결과 조회 |
@@ -137,7 +139,7 @@ ARCHIVE_LEDGER_SCHEDULER_INITIAL_DELAY_MS=15000
 
 The scheduled cycle:
 
-- runs settlement only when the target date has `SETTLEMENT_READY` transactions;
+- runs the approved daily batch path when the target date has `SETTLEMENT_READY` transactions;
 - avoids creating repeated empty settlement batches;
 - runs reconciliation periodically so `/api/reconciliation/summary` stays fresh;
 - keeps manual APIs available for explicit date-based reruns.
@@ -166,9 +168,10 @@ curl.exe "http://localhost:18080/api/ledger/summary?source=Archive-Logitics"
 3. 수신 이벤트 확인: `GET /api/events/received?source=Archive-Logitics`
 4. 정산 전 승인 필요 거래 확인: `GET /api/transactions?status=APPROVAL_REQUIRED`
 5. scheduler가 켜져 있으면 `SETTLEMENT_READY` 거래는 자동 정산 대상이 됩니다.
-6. 필요 시 일별 정산 재실행: `POST /api/settlements/daily/run?date=YYYY-MM-DD`
-7. 필요 시 일별 대사 재실행: `POST /api/reconciliation/daily?date=YYYY-MM-DD`
-8. mismatch 발생 시 `docs/reconciliation-fix.md`와 `docs/operations-runbook.md` 기준으로 원인을 분리합니다.
+6. 승인자가 일정산/대사를 함께 실행: `POST /api/batches/daily/run?date=YYYY-MM-DD&approvedBy=operator`
+7. 필요 시 개별 정산 재실행: `POST /api/settlements/daily/run?date=YYYY-MM-DD`
+8. 필요 시 개별 대사 재실행: `POST /api/reconciliation/daily?date=YYYY-MM-DD`
+9. mismatch 발생 시 `docs/reconciliation-fix.md`와 `docs/operations-runbook.md` 기준으로 원인을 분리합니다.
 
 ## 문서
 

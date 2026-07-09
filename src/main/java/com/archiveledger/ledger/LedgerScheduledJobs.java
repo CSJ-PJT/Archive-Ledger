@@ -43,22 +43,24 @@ public class LedgerScheduledJobs {
         }
 
         if (settlementEnabled) {
-            runSettlementIfReady(LocalDate.now().minusDays(settlementDateOffsetDays));
+            runDailyBatchIfReady(LocalDate.now().minusDays(settlementDateOffsetDays));
+            return;
         }
-        if (reconciliationEnabled) {
-            runReconciliation(LocalDate.now().minusDays(reconciliationDateOffsetDays));
-        }
+        runReconciliation(LocalDate.now().minusDays(reconciliationDateOffsetDays));
     }
 
-    private void runSettlementIfReady(LocalDate date) {
+    private void runDailyBatchIfReady(LocalDate date) {
         try {
             if (!ledger.hasSettlementReadyTransactions(date)) {
+                if (reconciliationEnabled) {
+                    runReconciliation(LocalDate.now().minusDays(reconciliationDateOffsetDays));
+                }
                 return;
             }
-            ledger.runSettlement(date);
-            log.info("Scheduled settlement completed for {}", date);
+            ledger.runDailyBatch(date, "Archive-Ledger-Scheduler", "SCHEDULED", true, reconciliationEnabled);
+            log.info("Scheduled daily batch completed for {}", date);
         } catch (RuntimeException error) {
-            log.warn("Scheduled settlement failed for {}: {}", date, error.getMessage());
+            log.warn("Scheduled daily batch failed for {}: {}", date, error.getMessage());
         }
     }
 

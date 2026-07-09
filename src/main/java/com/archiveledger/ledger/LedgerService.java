@@ -294,6 +294,87 @@ public class LedgerService {
         }
     }
 
+    public DailyBatchRunView runDailyBatch(LocalDate date, String approvedBy, String triggerType,
+                                           boolean settlementEnabled, boolean reconciliationEnabled) {
+        if (!settlementEnabled && !reconciliationEnabled) {
+            throw new IllegalArgumentException("At least one of settlement or reconciliation must be enabled.");
+        }
+
+        Instant started = Instant.now();
+        String runId = "DBR-" + date.toString().replace("-", "") + "-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase(Locale.ROOT);
+        String actor = value(approvedBy, "Archive-Ledger-Operator");
+        String trigger = value(triggerType, "MANUAL").toUpperCase(Locale.ROOT);
+        jdbc.update("""
+                insert into daily_batch_run(
+                    run_id,batch_date,status,approved_by,trigger_type,settlement_enabled,reconciliation_enabled,
+                    settlement_transaction_count,settlement_amount,mismatch_count,started_at
+                ) values(?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                runId,
+                Date.valueOf(date),
+                "RUNNING",
+                actor,
+                trigger,
+                settlementEnabled,
+                reconciliationEnabled,
+                0,
+                BigDecimal.ZERO,
+                0,
+                ts(started)
+        );
+
+        try {
+            SettlementBatchView settlement = null;
+            if (settlementEnabled && hasSettlementReadyTransactions(date)) {
+                settlement = runSettlement(date);
+            }
+
+            ReconciliationView reconciliation = null;
+            if (reconciliationEnabled) {
+                reconciliation = reconcile(date);
+            }
+
+            int transactionCount = settlement == null ? 0 : settlement.totalTransactionCount();
+            BigDecimal amount = settlement == null ? BigDecimal.ZERO : settlement.totalAmount();
+            int mismatch = reconciliation == null ? 0 : reconciliation.mismatch();
+            String reconciliationStatus = reconciliation == null ? null : reconciliation.status();
+            String status = mismatch > 0 ? "WARNING" : "SUCCESS";
+            jdbc.update("""
+                    update daily_batch_run
+                    set status=?, settlement_batch_id=?, reconciliation_status=?, settlement_transaction_count=?,
+                        settlement_amount=?, mismatch_count=?, completed_at=?
+                    where run_id=?
+                    """,
+                    status,
+                    settlement == null ? null : settlement.batchId(),
+                    reconciliationStatus,
+                    transactionCount,
+                    amount,
+                    mismatch,
+                    ts(Instant.now()),
+                    runId
+            );
+            audit(runId, actor, "DAILY_BATCH_COMPLETED", "daily_batch_run", runId,
+                    "RUNNING", status,
+                    Map.of(
+                            "date", date.toString(),
+                            "triggerType", trigger,
+                            "settlementBatchId", settlement == null ? "" : settlement.batchId(),
+                            "settlementTransactionCount", transactionCount,
+                            "reconciliationStatus", reconciliationStatus == null ? "" : reconciliationStatus,
+                            "mismatch", mismatch
+                    ));
+            return dailyBatch(runId).orElseThrow();
+        } catch (RuntimeException error) {
+            String message = error.getMessage() == null ? error.getClass().getSimpleName() : error.getMessage();
+            jdbc.update("update daily_batch_run set status='FAILED', failure_reason=?, completed_at=? where run_id=?",
+                    message, ts(Instant.now()), runId);
+            audit(runId, actor, "DAILY_BATCH_FAILED", "daily_batch_run", runId,
+                    "RUNNING", "FAILED", Map.of("date", date.toString(), "error", message));
+            throw error;
+        }
+    }
+
     public boolean hasSettlementReadyTransactions(LocalDate date) {
         return count("select count(*) from finance_transaction where status='SETTLEMENT_READY' and cast(occurred_at as date)=?",
                 Date.valueOf(date)) > 0;
@@ -428,6 +509,15 @@ public class LedgerService {
 
     public List<SettlementBatchView> settlements() {
         return jdbc.query("select * from settlement_batch order by started_at desc limit 200", this::settlementRow);
+    }
+
+    public List<DailyBatchRunView> dailyBatches() {
+        return jdbc.query("select * from daily_batch_run order by started_at desc limit 200", this::dailyBatchRunRow);
+    }
+
+    public Optional<DailyBatchRunView> dailyBatch(String runId) {
+        List<DailyBatchRunView> rows = jdbc.query("select * from daily_batch_run where run_id=?", this::dailyBatchRunRow, runId);
+        return rows.stream().findFirst();
     }
 
     public SettlementBatchView settlement(String batchId) {
@@ -816,6 +906,26 @@ public class LedgerService {
                 rs.getString("status"),
                 rs.getInt("total_transaction_count"),
                 rs.getBigDecimal("total_amount"),
+                instant(rs.getTimestamp("started_at")),
+                instant(rs.getTimestamp("completed_at")),
+                rs.getString("failure_reason")
+        );
+    }
+
+    private DailyBatchRunView dailyBatchRunRow(java.sql.ResultSet rs, int row) throws java.sql.SQLException {
+        return new DailyBatchRunView(
+                rs.getString("run_id"),
+                rs.getDate("batch_date").toLocalDate(),
+                rs.getString("status"),
+                rs.getString("approved_by"),
+                rs.getString("trigger_type"),
+                rs.getBoolean("settlement_enabled"),
+                rs.getBoolean("reconciliation_enabled"),
+                rs.getString("settlement_batch_id"),
+                rs.getString("reconciliation_status"),
+                rs.getInt("settlement_transaction_count"),
+                rs.getBigDecimal("settlement_amount"),
+                rs.getInt("mismatch_count"),
                 instant(rs.getTimestamp("started_at")),
                 instant(rs.getTimestamp("completed_at")),
                 rs.getString("failure_reason")

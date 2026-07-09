@@ -440,6 +440,92 @@ class LedgerApiTest {
     }
 
     @Test
+    void approvedTransactionIsSettledByDailySettlementAndReconciliationBatch() throws Exception {
+        clearTablesForDeterministicReconciliation();
+
+        String eventId = logisticsEventId();
+        String idempotency = logisticsIdempotency();
+        mvc.perform(post("/api/events/logistics").contentType(MediaType.APPLICATION_JSON).content(
+                        mapper.writeValueAsString(logisticsEvent("Archive-Logistics", eventId, idempotency, "COLD_CHAIN_RISK_COST_CONFIRMED", Map.of(
+                                "routePlanId", "ROUTE-" + nextId("LOG"),
+                                "shipmentId", "SHIP-" + nextId("SHIP"),
+                                "factoryId", "FAC-C",
+                                "originCode", "FAC-C",
+                                "destinationCode", "DC-SEOUL-01",
+                                "totalCost", 2_000L
+                        )))))
+                .andExpect(status().isOk());
+
+        String tx = transactionId(eventId);
+        String approvalRequestId = jdbc.queryForObject("select approval_request_id from finance_transaction where transaction_id=?", String.class, tx);
+        mvc.perform(post("/api/approvals/callback").contentType(MediaType.APPLICATION_JSON).content(mapper.writeValueAsString(
+                        Map.of(
+                                "approvalRequestId", approvalRequestId,
+                                "transactionId", tx,
+                                "decision", "APPROVED",
+                                "decidedBy", "dan18",
+                                "comment", "settlement approved"
+                        ))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("SETTLEMENT_READY"));
+
+        mvc.perform(post("/api/batches/daily/run")
+                        .param("date", LocalDate.now().toString())
+                        .param("approvedBy", "dan18"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("SUCCESS"))
+                .andExpect(jsonPath("$.approvedBy").value("dan18"))
+                .andExpect(jsonPath("$.settlementTransactionCount").value(1))
+                .andExpect(jsonPath("$.reconciliationStatus").value("OK"))
+                .andExpect(jsonPath("$.mismatchCount").value(0));
+
+        assertThat(transactionStatus(eventId)).isEqualTo("SETTLED");
+        assertThat(count("select count(*) from daily_batch_run where approved_by='dan18' and status='SUCCESS'")).isEqualTo(1);
+    }
+
+    @Test
+    void dailyBatchExcludesApprovalRequiredTransactionsUntilCallbackApproval() throws Exception {
+        clearTablesForDeterministicReconciliation();
+
+        String approvalEventId = logisticsEventId();
+        String readyEventId = logisticsEventId();
+
+        mvc.perform(post("/api/events/logistics").contentType(MediaType.APPLICATION_JSON).content(
+                        mapper.writeValueAsString(logisticsEvent("Archive-Logistics", approvalEventId, logisticsIdempotency(),
+                                "COLD_CHAIN_RISK_COST_CONFIRMED", Map.of(
+                                        "routePlanId", "ROUTE-" + nextId("LOG"),
+                                        "shipmentId", "SHIP-" + nextId("SHIP"),
+                                        "factoryId", "FAC-A",
+                                        "originCode", "FAC-A",
+                                        "destinationCode", "DC-SEOUL-01",
+                                        "totalCost", 2_000L
+                                )))))
+                .andExpect(status().isOk());
+
+        mvc.perform(post("/api/events/logistics").contentType(MediaType.APPLICATION_JSON).content(
+                        mapper.writeValueAsString(logisticsEvent("Archive-Logistics", readyEventId, logisticsIdempotency(),
+                                "LOGISTICS_COST_CONFIRMED", Map.of(
+                                        "routePlanId", "ROUTE-" + nextId("LOG"),
+                                        "shipmentId", "SHIP-" + nextId("SHIP"),
+                                        "factoryId", "FAC-A",
+                                        "originCode", "FAC-A",
+                                        "destinationCode", "DC-SEOUL-01",
+                                        "totalCost", 2_000L
+                                )))))
+                .andExpect(status().isOk());
+
+        mvc.perform(post("/api/batches/daily/run")
+                        .param("date", LocalDate.now().toString())
+                        .param("approvedBy", "dan18"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("SUCCESS"))
+                .andExpect(jsonPath("$.settlementTransactionCount").value(1));
+
+        assertThat(transactionStatus(readyEventId)).isEqualTo("SETTLED");
+        assertThat(transactionStatus(approvalEventId)).isEqualTo("APPROVAL_REQUIRED");
+    }
+
+    @Test
     void approvalCallbackRejectedMovesToRejected() throws Exception {
         String eventId = logisticsEventId();
         String idempotency = logisticsIdempotency();
@@ -673,6 +759,7 @@ class LedgerApiTest {
     }
 
     private void clearTablesForDeterministicReconciliation() {
+        jdbc.execute("delete from daily_batch_run");
         jdbc.execute("delete from reconciliation_result");
         jdbc.execute("delete from settlement_detail");
         jdbc.execute("delete from settlement_batch");

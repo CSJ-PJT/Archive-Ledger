@@ -72,6 +72,14 @@ public final class LedgerModels {
                                        String accountCode, BigDecimal amount, String status, Instant createdAt) {
     }
 
+    public record DailyBatchRunView(String runId, LocalDate batchDate, String status, String approvedBy,
+                                    String triggerType, boolean settlementEnabled, boolean reconciliationEnabled,
+                                    String settlementBatchId, String reconciliationStatus,
+                                    int settlementTransactionCount, BigDecimal settlementAmount,
+                                    int mismatchCount, Instant startedAt, Instant completedAt,
+                                    String failureReason) {
+    }
+
     public record ReconciliationView(LocalDate date, int nexusEvents, int receivedEvents, int createdTransactions,
                                      int logisticsEventCount, int directEventCount, int logisticsTransactionCount,
                                      int directTransactionCount, int duplicates, int failed, int approvalRequired,

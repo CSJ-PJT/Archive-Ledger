@@ -55,10 +55,15 @@ Supported filters:
 
 | Method | Path | Description |
 | --- | --- | --- |
+| POST | `/api/batches/daily/run?date=YYYY-MM-DD&approvedBy=operator` | Run approved daily settlement and reconciliation batch |
+| GET | `/api/batches/daily` | List daily batch runs |
+| GET | `/api/batches/daily/{runId}` | Get one daily batch run |
 | POST | `/api/settlements/daily/run?date=YYYY-MM-DD` | Run daily settlement |
 | GET | `/api/settlements` | List settlement batches |
 | GET | `/api/settlements/{batchId}` | Get one settlement batch |
 | GET | `/api/settlements/{batchId}/details` | List settlement details |
+
+The daily batch endpoint records `approvedBy`, `triggerType`, settlement batch id, reconciliation status, settled transaction count, amount, and mismatch count in `daily_batch_run`.
 
 ## Reconciliation
 

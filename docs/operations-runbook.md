@@ -33,7 +33,7 @@ ARCHIVE_LEDGER_SCHEDULER_INITIAL_DELAY_MS=15000
 
 Behavior:
 
-- settlement runs only when `SETTLEMENT_READY` transactions exist for the configured date;
+- the scheduler runs the approved daily batch path only when `SETTLEMENT_READY` transactions exist for the configured date;
 - `APPROVAL_REQUIRED`, `REJECTED`, duplicates, and failed events remain excluded;
 - reconciliation runs periodically and refreshes `/api/reconciliation/summary`;
 - manual APIs remain available for date-specific recovery runs.
@@ -82,6 +82,13 @@ Expected:
 
 - `APPROVED` -> `SETTLEMENT_READY`
 - rejected decisions -> `REJECTED`
+
+After approval, run the auditable daily batch:
+
+```powershell
+curl.exe -X POST "http://localhost:18080/api/batches/daily/run?date=YYYY-MM-DD&approvedBy=archiveos-operator"
+curl.exe http://localhost:18080/api/batches/daily
+```
 
 ## Mismatch Investigation
 
