@@ -4,12 +4,12 @@
   <img src="docs/brand/archive-os-logo.png" width="260" alt="ArchiveOS" />
 </p>
 
-Archive-Ledger는 Archive-Nexus direct 이벤트와 Archive-Logitics의 물류비 확정 이벤트를 수신해 거래 정규화, 복식 원장 기록, 승인 필요 여부 판단, 정산 제외, 대사 집계를 처리하는 Spring Boot 금융 백엔드입니다. source별 이벤트 구분, idempotency key 중복 방지, debit/credit 균형 검증으로 제조 → 물류 → 금융성 정산 흐름을 안정적으로 연결합니다.
+Archive-Ledger는 Archive-Nexus direct 이벤트와 Archive-Logistics의 물류비 확정 이벤트를 수신해 거래 정규화, 복식 원장 기록, 승인 필요 여부 판단, 정산 제외, 대사 집계를 처리하는 Spring Boot 금융 백엔드입니다. source별 이벤트 구분, idempotency key 중복 방지, debit/credit 균형 검증으로 제조 → 물류 → 금융성 정산 흐름을 안정적으로 연결합니다.
 
 ## 핵심 역할
 
 - Archive-Nexus 직접 이벤트(예: 제조/물류 직접 이벤트) 수신 및 처리
-- Archive-Logitics 물류비 확정 이벤트 수신 및 처리
+- Archive-Logistics 물류비 확정 이벤트 수신 및 처리
 - eventId/idempotencyKey 기반 duplicate-safe 처리
 - finance_transaction 생성 및 원장 분개 생성
 - 승인 필요 거래(Approval gate) 관리
@@ -56,6 +56,8 @@ curl.exe http://localhost:18080/actuator/health
 - 물류 이벤트 금액은 `totalCost` → `estimatedCost` → `amount` 순으로 사용
 - 금액이 없거나 0 이하면 실패 처리
 - `APPROVAL_REQUIRED`는 정산 대상에서 제외
+- 외부 표기는 `Archive-Logistics`로 통일한다.
+- 기존 계약 호환을 위해 이벤트 payload/query의 `source=Archive-Logitics` 값은 계속 수신한다.
 - `source=Archive-Logitics` + `LOGISTICS_DISPATCHED`도 호환 모드로 `LOGISTICS_COST` 처리
 
 ## 제출 검증 명령

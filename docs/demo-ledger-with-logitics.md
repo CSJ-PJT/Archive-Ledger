@@ -1,4 +1,6 @@
-# Demo: Archive-Ledger + Archive-Logitics
+# Demo: Archive-Ledger + Archive-Logistics
+
+External documents use `Archive-Logistics`. The smoke payloads keep `source=Archive-Logitics` because that value is the existing Ledger compatibility contract.
 
 ## 1) Start
 
@@ -16,7 +18,7 @@ curl.exe http://localhost:18080/actuator/health
 ## 2) Logistics-native smoke (accepted + duplicate)
 
 ```powershell
-$payload = '{"source":"Archive-Logitics","events":[{"eventId":"evt-logitics-final-smoke-001","idempotencyKey":"LOGITICS:LOGISTICS_COST_CONFIRMED:ROUTE-FINAL-SMOKE-001","source":"Archive-Logitics","eventType":"LOGISTICS_COST_CONFIRMED","schemaVersion":1,"occurredAt":"2026-01-15T10:45:00.000Z","payload":{"routePlanId":"ROUTE-FINAL-SMOKE-001","shipmentId":"SHIP-FINAL-SMOKE-001","factoryId":"FAC-A","vendorId":"VENDOR-LOGISTICS-01","originCode":"FAC-A","destinationCode":"DC-SEOUL-01","distanceKm":42,"estimatedMinutes":80,"fuelCost":60900,"tollCost":2520,"urgentSurcharge":30000,"delayPenalty":0,"coldChainPenalty":0,"totalCost":93420,"currency":"KRW","riskScore":0.42,"requiresApproval":false,"reason":"Synthetic logistics cost confirmed by Archive-Logitics","delayed":false,"deviated":false}}]}'
+$payload = '{"source":"Archive-Logitics","events":[{"eventId":"evt-logitics-final-smoke-001","idempotencyKey":"LOGITICS:LOGISTICS_COST_CONFIRMED:ROUTE-FINAL-SMOKE-001","source":"Archive-Logitics","eventType":"LOGISTICS_COST_CONFIRMED","schemaVersion":1,"occurredAt":"2026-01-15T10:45:00.000Z","payload":{"routePlanId":"ROUTE-FINAL-SMOKE-001","shipmentId":"SHIP-FINAL-SMOKE-001","factoryId":"FAC-A","vendorId":"VENDOR-LOGISTICS-01","originCode":"FAC-A","destinationCode":"DC-SEOUL-01","distanceKm":42,"estimatedMinutes":80,"fuelCost":60900,"tollCost":2520,"urgentSurcharge":30000,"delayPenalty":0,"coldChainPenalty":0,"totalCost":93420,"currency":"KRW","riskScore":0.42,"requiresApproval":false,"reason":"Synthetic logistics cost confirmed by Archive-Logistics","delayed":false,"deviated":false}}]}'
 curl.exe -X POST "http://localhost:18080/api/events/logistics/bulk" -H "Content-Type: application/json" -d $payload
 ```
 

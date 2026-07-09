@@ -1,6 +1,8 @@
 # Logistics Event Contract (Archive-Ledger)
 
-This document defines the logistics-native event contract from `Archive-Logitics` to Archive-Ledger.
+This document defines the logistics-native event contract from Archive-Logistics to Archive-Ledger.
+
+External documents use `Archive-Logistics`. The persisted event `source` value `Archive-Logitics` remains supported as an existing compatibility contract.
 
 ## Endpoints
 
@@ -50,7 +52,7 @@ Both endpoints accept the same event schema. Bulk format is:
     "currency": "KRW",
     "riskScore": 0.42,
     "requiresApproval": false,
-    "reason": "Synthetic logistics cost confirmed by Archive-Logitics",
+    "reason": "Synthetic logistics cost confirmed by Archive-Logistics",
     "delayed": false,
     "deviated": false
   }
@@ -78,7 +80,7 @@ Validation failures (`amount <= 0` or unresolved amount) return `status=FAILED` 
 - `DELAY_PENALTY_CONFIRMED` -> `DELAY_PENALTY`
 - `ROUTE_DEVIATION_COST_CONFIRMED` -> `ROUTE_DEVIATION_COST`
 - `COLD_CHAIN_RISK_COST_CONFIRMED` -> `COLD_CHAIN_RISK_COST`
-- `source=Archive-Logitics`, `eventType=LOGISTICS_DISPATCHED` -> `LOGISTICS_COST`
+- `source=Archive-Logitics`, `eventType=LOGISTICS_DISPATCHED` -> `LOGISTICS_COST` (compatibility source value)
 
 ## Approval rule (logistics)
 
@@ -105,6 +107,6 @@ Otherwise status is `SETTLEMENT_READY`.
 ## Compatibility mode
 
 `Archive-Ledger` keeps existing `/api/events/nexus/*` path unchanged.
-When a payload from `source=Archive-Logitics` arrives with `eventType=LOGISTICS_DISPATCHED`, it is handled as logistics confirmed cost and normalized as `LOGISTICS_COST`.
+When a payload from compatibility source value `Archive-Logitics` arrives with `eventType=LOGISTICS_DISPATCHED`, it is handled as logistics confirmed cost and normalized as `LOGISTICS_COST`.
 
 `sourceService` is stored in persisted events and transaction rows for source-level operations summary.

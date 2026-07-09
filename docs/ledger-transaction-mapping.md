@@ -11,7 +11,7 @@ This document defines how logistics events are normalized into finance transacti
 | DELAY_PENALTY_CONFIRMED | DELAY_PENALTY |
 | ROUTE_DEVIATION_COST_CONFIRMED | ROUTE_DEVIATION_COST |
 | COLD_CHAIN_RISK_COST_CONFIRMED | COLD_CHAIN_RISK_COST |
-| LOGISTICS_DISPATCHED (from Archive-Logitics) | LOGISTICS_COST |
+| LOGISTICS_DISPATCHED (Archive-Logistics compatibility source `Archive-Logitics`) | LOGISTICS_COST |
 
 ## Ledger debit / credit mapping
 
@@ -40,4 +40,5 @@ Notes:
 Source handling:
 
 - `source=Archive-Nexus` uses direct mapping as implemented in existing rules.
-- `source=Archive-Logitics` uses the logistics mapping above and is included in source-level reconciliation (`logisticsTransactionCount`).
+- Archive-Logistics events use the logistics mapping above and are included in source-level reconciliation (`logisticsTransactionCount`).
+- `source=Archive-Logitics` remains the compatibility source value used by existing event payloads and query examples.

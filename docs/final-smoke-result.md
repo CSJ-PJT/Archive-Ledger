@@ -1,5 +1,7 @@
 # Final Smoke Result (Archive-Ledger, 2026-07-09)
 
+External documents use `Archive-Logistics`. The smoke records keep `Archive-Logitics` only where it is the existing event `source` compatibility value.
+
 ## 1) Baseline checks
 
 - `GET /actuator/health` -> `{"status":"UP"}`
@@ -86,3 +88,5 @@
 
 - No code changes were made in the previous step; this round applies the remaining reconciliation status issue.
 - Legacy duplicate-only mismatch inflation is resolved in `reconcile()`; reconciliation status now reflects only non-duplicate non-failed imbalances.
+- Final reconciliation mismatch formula: `max(0, received - duplicate - created - failed)`.
+- Regression test confirmed duplicate events produce `mismatch=0` and `status=OK`.
