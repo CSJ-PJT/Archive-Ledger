@@ -1,44 +1,40 @@
-# Ledger Transaction Mapping (Logistics)
+# Ledger Transaction Mapping
 
-This document defines how logistics events are normalized into finance transactions and ledger accounts.
+This document describes how accepted events become finance transactions and double-entry ledger rows.
 
-## Logistics event -> transactionType
+## Logistics Event Mapping
 
-| Logistics event type | transactionType |
+| Logistics eventType | transactionType |
 | --- | --- |
-| LOGISTICS_COST_CONFIRMED | LOGISTICS_COST |
-| URGENT_DELIVERY_COST_CONFIRMED | URGENT_DELIVERY_COST |
-| DELAY_PENALTY_CONFIRMED | DELAY_PENALTY |
-| ROUTE_DEVIATION_COST_CONFIRMED | ROUTE_DEVIATION_COST |
-| COLD_CHAIN_RISK_COST_CONFIRMED | COLD_CHAIN_RISK_COST |
-| LOGISTICS_DISPATCHED (Archive-Logistics compatibility source `Archive-Logitics`) | LOGISTICS_COST |
+| `LOGISTICS_COST_CONFIRMED` | `LOGISTICS_COST` |
+| `URGENT_DELIVERY_COST_CONFIRMED` | `URGENT_DELIVERY_COST` |
+| `DELAY_PENALTY_CONFIRMED` | `DELAY_PENALTY` |
+| `ROUTE_DEVIATION_COST_CONFIRMED` | `ROUTE_DEVIATION_COST` |
+| `COLD_CHAIN_RISK_COST_CONFIRMED` | `COLD_CHAIN_RISK_COST` |
+| `LOGISTICS_DISPATCHED` with compatibility source `Archive-Logitics` | `LOGISTICS_COST` |
 
-## Ledger debit / credit mapping
+## Logistics Ledger Accounts
 
 | transactionType | debit account | credit account |
 | --- | --- | --- |
-| LOGISTICS_COST | LOGISTICS_EXPENSE | ACCOUNTS_PAYABLE |
-| URGENT_DELIVERY_COST | URGENT_DELIVERY_EXPENSE | ACCOUNTS_PAYABLE |
-| DELAY_PENALTY | DELAY_PENALTY_EXPENSE | ACCOUNTS_PAYABLE |
-| ROUTE_DEVIATION_COST | ROUTE_DEVIATION_EXPENSE | ACCOUNTS_PAYABLE |
-| COLD_CHAIN_RISK_COST | COLD_CHAIN_RISK_EXPENSE | ACCOUNTS_PAYABLE |
+| `LOGISTICS_COST` | `LOGISTICS_EXPENSE` | `ACCOUNTS_PAYABLE` |
+| `URGENT_DELIVERY_COST` | `URGENT_DELIVERY_EXPENSE` | `ACCOUNTS_PAYABLE` |
+| `DELAY_PENALTY` | `DELAY_PENALTY_EXPENSE` | `ACCOUNTS_PAYABLE` |
+| `ROUTE_DEVIATION_COST` | `ROUTE_DEVIATION_EXPENSE` | `ACCOUNTS_PAYABLE` |
+| `COLD_CHAIN_RISK_COST` | `COLD_CHAIN_RISK_EXPENSE` | `ACCOUNTS_PAYABLE` |
 
-Notes:
+## Direct Nexus Mapping
 
-- direct Nexus event mappings remain unchanged
-- each transaction always creates two entries (debit and credit)
-- debit/credit totals are equal by construction
+Direct Nexus events retain the existing Ledger direct mapping. Examples include maintenance, shipment hold, emergency purchase, and corporate card-style synthetic operating expenses.
 
-## Settlement / approval behavior
+## Balance Invariant
 
-- `APPROVAL_REQUIRED`: excluded from settlement
-- `SETTLEMENT_READY`: included in daily settlement
-- Approval callback:
-  - `APPROVED` -> `SETTLEMENT_READY`
-  - `REJECTED` -> `REJECTED`
+For every accepted transaction:
 
-Source handling:
+```text
+sum(ledger_entry.debit_amount where transaction_id = X)
+==
+sum(ledger_entry.credit_amount where transaction_id = X)
+```
 
-- `source=Archive-Nexus` uses direct mapping as implemented in existing rules.
-- Archive-Logistics events use the logistics mapping above and are included in source-level reconciliation (`logisticsTransactionCount`).
-- `source=Archive-Logitics` remains the compatibility source value used by existing event payloads and query examples.
+Settlement and reconciliation assume this invariant. Any future account mapping change should be covered by a test that verifies debit/credit balance by `transaction_id`.

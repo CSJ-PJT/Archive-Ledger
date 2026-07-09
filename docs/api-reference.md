@@ -1,0 +1,93 @@
+# API Reference
+
+Base URL: `http://localhost:18080`
+
+## Event Ingestion
+
+| Method | Path | Description |
+| --- | --- | --- |
+| POST | `/api/events/nexus` | Ingest one Nexus direct event |
+| POST | `/api/events/nexus/bulk` | Ingest Nexus direct events as an array |
+| POST | `/api/events/logistics` | Ingest one Logistics cost event |
+| POST | `/api/events/logistics/bulk` | Ingest Logistics cost events in `{ source, events }` format |
+| GET | `/api/events/received` | List recent received events |
+| GET | `/api/events/received/{eventId}` | Get one received event |
+
+Supported filters:
+
+- `GET /api/events/received?source=Archive-Nexus`
+- `GET /api/events/received?source=Archive-Logitics`
+
+## Transactions
+
+| Method | Path | Description |
+| --- | --- | --- |
+| GET | `/api/transactions` | List recent transactions |
+| GET | `/api/transactions/{transactionId}` | Get one transaction |
+
+Supported filters:
+
+- `status`
+- `source`
+
+Examples:
+
+```powershell
+curl.exe "http://localhost:18080/api/transactions?status=APPROVAL_REQUIRED"
+curl.exe "http://localhost:18080/api/transactions?source=Archive-Logitics"
+```
+
+## Ledger
+
+| Method | Path | Description |
+| --- | --- | --- |
+| GET | `/api/ledger/entries` | List ledger entries |
+| GET | `/api/ledger/summary` | Summarize debit/credit totals |
+
+Supported filters:
+
+- `transactionId`
+- `date`
+- `factoryId`
+- `source`
+
+## Settlement
+
+| Method | Path | Description |
+| --- | --- | --- |
+| POST | `/api/settlements/daily/run?date=YYYY-MM-DD` | Run daily settlement |
+| GET | `/api/settlements` | List settlement batches |
+| GET | `/api/settlements/{batchId}` | Get one settlement batch |
+| GET | `/api/settlements/{batchId}/details` | List settlement details |
+
+## Reconciliation
+
+| Method | Path | Description |
+| --- | --- | --- |
+| POST | `/api/reconciliation/daily?date=YYYY-MM-DD` | Run daily reconciliation |
+| GET | `/api/reconciliation/daily?date=YYYY-MM-DD` | Get latest reconciliation for date |
+| GET | `/api/reconciliation/summary` | Get latest reconciliation result |
+
+## Approval
+
+```http
+POST /api/approvals/callback
+Content-Type: application/json
+
+{
+  "approvalRequestId": "APR-20260709-BBBC52B6-A",
+  "transactionId": "TX-20260709-E4DD5558-6",
+  "decision": "APPROVED",
+  "decidedBy": "archiveos-operator",
+  "comment": "Approved by policy gate"
+}
+```
+
+`APPROVED` transitions the transaction to `SETTLEMENT_READY`. Other decisions are treated as rejection and transition the transaction to `REJECTED`.
+
+## Operations
+
+| Method | Path | Description |
+| --- | --- | --- |
+| GET | `/api/operations/summary` | Service status, event counts, transaction counts, source breakdown |
+| GET | `/actuator/health` | Spring Actuator health |
