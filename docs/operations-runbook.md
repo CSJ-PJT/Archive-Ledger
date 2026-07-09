@@ -3,6 +3,7 @@
 ## Daily Checks
 
 ```powershell
+curl.exe http://localhost:18080/process.html
 curl.exe http://localhost:18080/actuator/health
 curl.exe http://localhost:18080/api/operations/summary
 curl.exe http://localhost:18080/api/reconciliation/summary
@@ -15,6 +16,8 @@ Check:
 - duplicate count is explainable by retries
 - last reconciliation status is `OK` or an explainable `WARNING`
 - approval required count is expected before settlement
+
+The browser dashboard at `/process.html` shows these same checks visually and refreshes every 30 seconds.
 
 ## Event Triage
 

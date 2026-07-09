@@ -36,6 +36,25 @@ Archive-Ledger는 Archive-Nexus direct 비용 이벤트와 Archive-Logistics nat
 
 단건 수신 API인 `/api/events/nexus`, `/api/events/logistics`도 유지합니다.
 
+## Process Dashboard
+
+Archive-Ledger는 전체 처리 흐름을 확인할 수 있는 운영 대시보드를 제공합니다.
+
+- Local URL: `http://localhost:18080/process.html`
+- Root URL: `http://localhost:18080/`
+
+대시보드는 기존 API를 호출해 다음 상태를 한 화면에 표시합니다.
+
+- Nexus direct 이벤트 수신량
+- Logistics native 이벤트 수신량
+- duplicate-safe 처리량
+- finance transaction 생성량
+- debit/credit ledger balance
+- approval required 거래 수
+- settlement 결과
+- reconciliation `mismatch`와 `status`
+- 최근 transaction 목록
+
 ## 운영 원칙
 
 ### Idempotency
@@ -132,6 +151,7 @@ curl.exe "http://localhost:18080/api/ledger/summary?source=Archive-Logitics"
 ## 문서
 
 - [Architecture](docs/architecture.md)
+- [Process Dashboard](docs/process-dashboard.md)
 - [API Reference](docs/api-reference.md)
 - [Nexus Direct Event Contract](docs/nexus-direct-event-contract.md)
 - [Logistics Event Contract](docs/logistics-event-contract.md)

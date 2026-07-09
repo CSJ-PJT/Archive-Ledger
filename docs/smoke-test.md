@@ -10,6 +10,7 @@ docker compose up --build -d
 ## Basic Checks
 
 ```powershell
+curl.exe http://localhost:18080/process.html
 curl.exe http://localhost:18080/actuator/health
 curl.exe http://localhost:18080/api/operations/summary
 curl.exe http://localhost:18080/api/reconciliation/summary
@@ -17,6 +18,7 @@ curl.exe http://localhost:18080/api/reconciliation/summary
 
 Expected:
 
+- process dashboard HTML is returned
 - health status is `UP`
 - operations summary returns JSON
 - reconciliation summary returns latest or newly generated summary

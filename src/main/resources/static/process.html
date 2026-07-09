@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Archive-Ledger Process Dashboard</title>
+  <link rel="stylesheet" href="/assets/process.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <img src="/assets/archive-os-logo.png" alt="ArchiveOS">
+      <div>
+        <p class="eyebrow">Archive Platform Ecosystem</p>
+        <h1>Archive-Ledger Process Dashboard</h1>
+      </div>
+    </div>
+    <div class="actions">
+      <span id="lastUpdated" class="timestamp">-</span>
+      <button id="refreshButton" type="button">새로고침</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="summary-band" aria-label="운영 요약">
+      <div class="metric">
+        <span>Service</span>
+        <strong id="serviceStatus">UNKNOWN</strong>
+      </div>
+      <div class="metric">
+        <span>Received Events</span>
+        <strong id="receivedEvents">0</strong>
+      </div>
+      <div class="metric">
+        <span>Transactions</span>
+        <strong id="transactions">0</strong>
+      </div>
+      <div class="metric">
+        <span>Reconciliation</span>
+        <strong id="reconciliationStatus">UNKNOWN</strong>
+      </div>
+      <div class="metric">
+        <span>Mismatch</span>
+        <strong id="mismatch">0</strong>
+      </div>
+    </section>
+
+    <section class="flow-section" aria-label="전체 이벤트 처리 흐름">
+      <div class="section-heading">
+        <p class="eyebrow">End-to-end flow</p>
+        <h2>제조·물류 이벤트에서 원장·정산·대사까지</h2>
+      </div>
+      <div class="flow-grid">
+        <article class="flow-node source">
+          <span class="node-label">1A</span>
+          <h3>Archive-Nexus</h3>
+          <p>Direct 비용 이벤트를 Ledger로 발행합니다.</p>
+          <strong id="nexusEvents">0</strong>
+          <small>received from Nexus</small>
+        </article>
+        <article class="flow-node source">
+          <span class="node-label">1B</span>
+          <h3>Archive-Logistics</h3>
+          <p>물류비 확정 이벤트를 native API로 전달합니다.</p>
+          <strong id="logisticsEvents">0</strong>
+          <small>compat source: Archive-Logitics</small>
+        </article>
+        <article class="flow-node core">
+          <span class="node-label">2</span>
+          <h3>Ingestion</h3>
+          <p>eventId와 idempotencyKey로 중복을 차단합니다.</p>
+          <strong id="duplicates">0</strong>
+          <small>duplicate-safe events</small>
+        </article>
+        <article class="flow-node core">
+          <span class="node-label">3</span>
+          <h3>Transaction</h3>
+          <p>비즈니스 이벤트를 finance_transaction으로 정규화합니다.</p>
+          <strong id="createdTransactions">0</strong>
+          <small>created transactions</small>
+        </article>
+        <article class="flow-node core">
+          <span class="node-label">4</span>
+          <h3>Double-entry Ledger</h3>
+          <p>debit/credit entry를 함께 생성해 금액 균형을 유지합니다.</p>
+          <strong id="ledgerBalance">-</strong>
+          <small>logistics ledger balance</small>
+        </article>
+        <article class="flow-node gate">
+          <span class="node-label">5</span>
+          <h3>Approval Gate</h3>
+          <p>고액·고위험 거래는 ArchiveOS 승인 전 정산에서 제외합니다.</p>
+          <strong id="approvalRequired">0</strong>
+          <small>approval required</small>
+        </article>
+        <article class="flow-node settlement">
+          <span class="node-label">6</span>
+          <h3>Settlement</h3>
+          <p>SETTLEMENT_READY 거래만 일별 settlement batch에 포함합니다.</p>
+          <strong id="settled">0</strong>
+          <small>settled transactions</small>
+        </article>
+        <article class="flow-node reconciliation">
+          <span class="node-label">7</span>
+          <h3>Reconciliation</h3>
+          <p>duplicate를 제외한 기대 거래 수로 mismatch를 계산합니다.</p>
+          <strong id="reconciliationDetail">-</strong>
+          <small>received - duplicate - created - failed</small>
+        </article>
+      </div>
+    </section>
+
+    <section class="panel-grid" aria-label="운영 상세">
+      <article class="panel">
+        <div class="section-heading compact">
+          <p class="eyebrow">Source breakdown</p>
+          <h2>이벤트 source별 처리량</h2>
+        </div>
+        <dl class="stats-list">
+          <div><dt>Nexus direct</dt><dd id="sourceNexus">0</dd></div>
+          <div><dt>Logistics native</dt><dd id="sourceLogistics">0</dd></div>
+          <div><dt>Failed events</dt><dd id="failedEvents">0</dd></div>
+          <div><dt>Settlement ready</dt><dd id="settlementReady">0</dd></div>
+        </dl>
+      </article>
+
+      <article class="panel">
+        <div class="section-heading compact">
+          <p class="eyebrow">Ledger balance</p>
+          <h2>source별 debit / credit</h2>
+        </div>
+        <div class="balance-list">
+          <div>
+            <span>Archive-Logistics</span>
+            <strong id="logisticsDebitCredit">-</strong>
+          </div>
+          <div>
+            <span>Archive-Nexus</span>
+            <strong id="nexusDebitCredit">-</strong>
+          </div>
+        </div>
+      </article>
+
+      <article class="panel wide">
+        <div class="section-heading compact">
+          <p class="eyebrow">Recent transactions</p>
+          <h2>최근 거래</h2>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Transaction</th>
+                <th>Type</th>
+                <th>Status</th>
+                <th>Amount</th>
+                <th>Approval</th>
+              </tr>
+            </thead>
+            <tbody id="transactionRows">
+              <tr><td colspan="5">Loading...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </article>
+    </section>
+
+    <section class="runbook-band" aria-label="운영 runbook">
+      <div class="section-heading compact">
+        <p class="eyebrow">Runbook</p>
+        <h2>운영 확인 순서</h2>
+      </div>
+      <ol>
+        <li><code>/actuator/health</code>에서 서비스 상태를 확인합니다.</li>
+        <li><code>/api/operations/summary</code>에서 event, transaction, approval, settlement 상태를 확인합니다.</li>
+        <li><code>/api/ledger/summary?source=Archive-Logitics</code>에서 debit/credit 균형을 확인합니다.</li>
+        <li><code>/api/reconciliation/summary</code>에서 <code>mismatch=0</code>, <code>status=OK</code>를 확인합니다.</li>
+      </ol>
+    </section>
+  </main>
+
+  <script src="/assets/process.js"></script>
+</body>
+</html>
