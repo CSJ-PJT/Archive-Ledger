@@ -2,8 +2,24 @@ const sourceLogistics = "Archive-Logitics";
 const sourceNexus = "Archive-Nexus";
 
 const byId = (id) => document.getElementById(id);
+const languages = ["ko", "en", "ja", "zh"];
 const formatNumber = (value) => Number(value ?? 0).toLocaleString("ko-KR");
 const formatMoney = (value) => Number(value ?? 0).toLocaleString("ko-KR");
+
+function initLanguageSelector() {
+  const selector = byId("languageSelector");
+  if (!selector) return;
+  const saved = localStorage.getItem("archive-ledger-language");
+  const language = languages.includes(saved) ? saved : "ko";
+  selector.value = language;
+  document.documentElement.lang = language;
+  document.documentElement.dataset.language = language;
+  selector.addEventListener("change", () => {
+    localStorage.setItem("archive-ledger-language", selector.value);
+    document.documentElement.lang = selector.value;
+    document.documentElement.dataset.language = selector.value;
+  });
+}
 
 async function getJson(path) {
   const response = await fetch(path, { headers: { Accept: "application/json" } });
@@ -118,5 +134,6 @@ async function guardedRefresh() {
 }
 
 byId("refreshButton")?.addEventListener("click", guardedRefresh);
+initLanguageSelector();
 guardedRefresh();
 setInterval(guardedRefresh, 30000);
