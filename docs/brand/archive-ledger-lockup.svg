@@ -1,69 +1,26 @@
-<svg width="1200" height="360" viewBox="0 0 1200 360" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
-  <title id="title">Archive-Ledger brand lockup</title>
-  <desc id="desc">Archive-Ledger financial ledger and settlement backend logo lockup.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1500 420" role="img" aria-labelledby="title desc">
+  <title id="title">Archive Ledger</title>
+  <desc id="desc">Archive-Ledger financial ledger and settlement backend lockup.</desc>
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1200" y2="360" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#08111F"/>
-      <stop offset="0.48" stop-color="#12243D"/>
-      <stop offset="1" stop-color="#18352F"/>
+    <linearGradient id="mark-white" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fff"/>
+      <stop offset="0.55" stop-color="#fafafa"/>
+      <stop offset="1" stop-color="#ececec"/>
     </linearGradient>
-    <linearGradient id="mark" x1="98" y1="48" x2="286" y2="286" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#7DD3FC"/>
-      <stop offset="0.52" stop-color="#38BDF8"/>
-      <stop offset="1" stop-color="#34D399"/>
+    <linearGradient id="accent" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#12f2f5"/>
+      <stop offset="1" stop-color="#00dde8"/>
     </linearGradient>
-    <linearGradient id="coin" x1="171" y1="97" x2="246" y2="228" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#FDE68A"/>
-      <stop offset="1" stop-color="#F59E0B"/>
-    </linearGradient>
-    <filter id="shadow" x="38" y="28" width="322" height="322" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
-      <feFlood flood-opacity="0" result="BackgroundImageFix"/>
-      <feColorMatrix in="SourceAlpha" type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 127 0" result="hardAlpha"/>
-      <feOffset dy="18"/>
-      <feGaussianBlur stdDeviation="18"/>
-      <feColorMatrix type="matrix" values="0 0 0 0 0.01 0 0 0 0 0.03 0 0 0 0 0.08 0 0 0 0.45 0"/>
-      <feBlend mode="normal" in2="BackgroundImageFix" result="effect1_dropShadow"/>
-      <feBlend mode="normal" in="SourceGraphic" in2="effect1_dropShadow" result="shape"/>
-    </filter>
   </defs>
 
-  <rect width="1200" height="360" rx="28" fill="url(#bg)"/>
-  <path d="M48 284C167 232 303 238 424 275C547 313 667 312 787 266C925 213 1040 214 1152 259" stroke="#7DD3FC" stroke-opacity="0.14" stroke-width="2"/>
-  <path d="M64 88C197 130 326 120 462 77C594 35 732 44 865 101C980 150 1067 160 1142 134" stroke="#34D399" stroke-opacity="0.12" stroke-width="2"/>
+  <rect width="1500" height="420" rx="24" fill="#000"/>
 
-  <g filter="url(#shadow)">
-    <rect x="72" y="54" width="232" height="232" rx="42" fill="#0F172A" stroke="#244159" stroke-width="2"/>
-    <path d="M116 234V103C116 95.268 122.268 89 130 89H229C236.732 89 243 95.268 243 103V234" stroke="url(#mark)" stroke-width="11" stroke-linecap="round"/>
-    <path d="M146 122H213M146 154H213M146 186H190" stroke="#D9F99D" stroke-width="10" stroke-linecap="round"/>
-    <circle cx="230" cy="219" r="45" fill="url(#coin)" stroke="#FFF7ED" stroke-opacity="0.75" stroke-width="5"/>
-    <path d="M212 219H248M230 201V237" stroke="#7C2D12" stroke-width="8" stroke-linecap="round"/>
-    <path d="M105 252H274" stroke="#7DD3FC" stroke-opacity="0.7" stroke-width="10" stroke-linecap="round"/>
+  <g transform="translate(28 22) scale(.36)">
+    <path d="M475.3 144.5 91.5 855 213.1 853.3 512 297.2 677.8 605.9 538.9 608.4 538.9 632.9 691.6 632.9 754.5 750.4 503.8 752.9 551.2 854.1 932.5 855 550.4 145.4Z" fill="url(#mark-white)"/>
+    <circle cx="498" cy="620.6" r="42" fill="url(#accent)"/>
   </g>
 
-  <g>
-    <text x="368" y="122" fill="#E5F2FF" font-family="Segoe UI, Inter, Arial, sans-serif" font-size="56" font-weight="800" letter-spacing="0">Archive-Ledger</text>
-    <text x="371" y="166" fill="#A7F3D0" font-family="Segoe UI, Inter, Arial, sans-serif" font-size="22" font-weight="650" letter-spacing="0">Financial Ledger · Settlement · Reconciliation</text>
-    <text x="371" y="212" fill="#CBD5E1" font-family="Segoe UI, Inter, Arial, sans-serif" font-size="20" font-weight="500" letter-spacing="0">Synthetic finance transaction backend for the Archive Platform Ecosystem.</text>
-  </g>
-
-  <g transform="translate(370 244)">
-    <rect width="156" height="42" rx="8" fill="#0B182A" stroke="#2E4B66"/>
-    <circle cx="22" cy="21" r="6" fill="#34D399"/>
-    <text x="39" y="28" fill="#E2E8F0" font-family="Segoe UI, Inter, Arial, sans-serif" font-size="16" font-weight="650">Double-entry</text>
-  </g>
-  <g transform="translate(546 244)">
-    <rect width="148" height="42" rx="8" fill="#0B182A" stroke="#2E4B66"/>
-    <circle cx="22" cy="21" r="6" fill="#38BDF8"/>
-    <text x="39" y="28" fill="#E2E8F0" font-family="Segoe UI, Inter, Arial, sans-serif" font-size="16" font-weight="650">Idempotent</text>
-  </g>
-  <g transform="translate(714 244)">
-    <rect width="154" height="42" rx="8" fill="#0B182A" stroke="#2E4B66"/>
-    <circle cx="22" cy="21" r="6" fill="#FDE68A"/>
-    <text x="39" y="28" fill="#E2E8F0" font-family="Segoe UI, Inter, Arial, sans-serif" font-size="16" font-weight="650">Workforce</text>
-  </g>
-  <g transform="translate(888 244)">
-    <rect width="170" height="42" rx="8" fill="#0B182A" stroke="#2E4B66"/>
-    <circle cx="22" cy="21" r="6" fill="#F97316"/>
-    <text x="39" y="28" fill="#E2E8F0" font-family="Segoe UI, Inter, Arial, sans-serif" font-size="16" font-weight="650">Approval-safe</text>
-  </g>
+  <text x="400" y="182" fill="#f5f7fa" font-family="Arial, sans-serif" font-size="76" font-weight="700" letter-spacing="12">ARCHIVE</text>
+  <text x="870" y="182" fill="#00e6ef" font-family="Arial, sans-serif" font-size="76" font-weight="700" letter-spacing="12">LEDGER</text>
+  <text x="404" y="244" fill="#00e6ef" font-family="Arial, sans-serif" font-size="22" font-weight="700" letter-spacing="5">FINANCIAL LEDGER. SETTLEMENT. RECONCILIATION.</text>
 </svg>
