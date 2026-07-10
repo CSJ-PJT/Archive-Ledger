@@ -10,6 +10,7 @@ Archive-Ledger owns:
 
 - event ingestion for Nexus direct cost events
 - event ingestion for Logistics cost-confirmed events
+- event ingestion for Archive-Market events
 - idempotency and duplicate-safe processing
 - `finance_transaction` creation
 - `ledger_entry` debit/credit creation
@@ -37,6 +38,14 @@ Archive-Nexus
 
 Archive-Logistics
   -> POST /api/events/logistics/bulk
+  -> received_event
+  -> finance_transaction
+  -> ledger_entry
+  -> approval_request when required
+  -> settlement_batch / reconciliation_result
+
+Archive-Market
+  -> POST /api/events/market/bulk
   -> received_event
   -> finance_transaction
   -> ledger_entry
@@ -74,3 +83,4 @@ Archive-Ledger approval_request
 ## Source Naming
 
 External service documentation uses `Archive-Logistics`. Existing event contracts still use `source=Archive-Logitics` as a compatibility literal. Ledger keeps that literal supported to avoid breaking previously emitted events.
+Market contracts use `source=Archive-Market`.

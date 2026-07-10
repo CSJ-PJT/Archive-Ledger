@@ -37,7 +37,10 @@ public class LedgerService {
     private static final String SOURCE_NEXUS = "Archive-Nexus";
     private static final String SOURCE_LOGITICS = "Archive-Logitics";
     private static final String SOURCE_LOGISTICS = "Archive-Logistics";
+    private static final String SOURCE_MARKET = "Archive-Market";
     private static final BigDecimal LOGISTICS_APPROVAL_THRESHOLD = new BigDecimal("300000");
+    private static final BigDecimal MARKET_APPROVAL_THRESHOLD = new BigDecimal("300000");
+    private static final BigDecimal LOGISTICS_LOW_RISK_SCORE = new BigDecimal("0.85");
     private static final int BULK_RESULT_LIMIT = 50;
 
     public LedgerService(JdbcTemplate jdbc,
@@ -62,6 +65,11 @@ public class LedgerService {
         return ingestWithSource(withSourceFallback(request, SOURCE_LOGITICS));
     }
 
+    @Transactional
+    public EventIngestionResponse ingestMarket(NexusEventRequest request) {
+        return ingestWithSource(withSourceFallback(request, SOURCE_MARKET));
+    }
+
     public BulkIngestionResponse ingestBulk(List<NexusEventRequest> requests) {
         return ingestBulkInternal(
                 requests == null ? List.of() : requests,
@@ -71,6 +79,14 @@ public class LedgerService {
 
     public BulkIngestionResponse ingestLogisticsBulk(LogisticsBulkRequest request) {
         String source = value(request == null ? null : request.source(), SOURCE_LOGITICS);
+        List<NexusEventRequest> events = request == null || request.events() == null
+                ? List.of()
+                : request.events().stream().map(event -> withSourceFallback(event, source)).toList();
+        return ingestBulkInternal(events, Function.identity());
+    }
+
+    public BulkIngestionResponse ingestMarketBulk(MarketBulkRequest request) {
+        String source = value(request == null ? null : request.source(), SOURCE_MARKET);
         List<NexusEventRequest> events = request == null || request.events() == null
                 ? List.of()
                 : request.events().stream().map(event -> withSourceFallback(event, source)).toList();
@@ -101,6 +117,13 @@ public class LedgerService {
         }
 
         String source = value(request.source(), SOURCE_NEXUS);
+        Map<String, Object> payload = request.payload();
+        String simulationRunId = text(payload == null ? null : payload.get("simulationRunId"));
+        String settlementCycleId = text(payload == null ? null : payload.get("settlementCycleId"));
+        String correlationId = text(payload == null ? null : payload.get("correlationId"));
+        String causationId = text(payload == null ? null : payload.get("causationId"));
+        int hopCount = parseInt(payload == null ? null : payload.get("hopCount"), 0);
+        int maxHop = parseInt(payload == null ? null : payload.get("maxHop"), Integer.MAX_VALUE);
 
         if (exists("select count(*) from received_event where event_id=? or idempotency_key=?", request.eventId(), request.idempotencyKey())) {
             metrics.duplicateEvent();
@@ -108,6 +131,20 @@ public class LedgerService {
                     "RECEIVED", "DUPLICATE",
                     Map.of("idempotencyKey", request.idempotencyKey(), "source", source));
             return new EventIngestionResponse(request.eventId(), "DUPLICATE", null, true, "Duplicate event ignored safely.");
+        }
+        if (isMarketSource(source) && correlationId != null && isCorrelationDuplicate(source, request.eventType(), correlationId)) {
+            metrics.duplicateEvent();
+            audit(request.eventId(), "Archive-Ledger", "CORRELATION_DUPLICATE_EVENT", "received_event", request.eventId(),
+                    "RECEIVED", "DUPLICATE",
+                    Map.of("correlationId", correlationId, "source", source, "eventType", request.eventType()));
+            return new EventIngestionResponse(request.eventId(), "DUPLICATE", null, true,
+                    "Duplicate market event by correlationId and eventType.");
+        }
+        if (isMarketSource(source) && maxHop < Integer.MAX_VALUE && hopCount > maxHop) {
+            audit(request.eventId(), "Archive-Ledger", "EVENT_HOP_GUARD_REJECTED", "received_event", request.eventId(),
+                    "RECEIVED", "FAILED", Map.of("hopCount", hopCount, "maxHop", maxHop, "source", source));
+            return new EventIngestionResponse(request.eventId(), "FAILED", null, false,
+                    "Event hopCount exceeded maxHop.");
         }
 
         Instant receivedAt = Instant.now();
@@ -118,8 +155,11 @@ public class LedgerService {
 
         try {
             jdbc.update("""
-                    insert into received_event(event_id,idempotency_key,source,source_service,event_type,schema_version,payload,processing_status,received_at)
-                    values(?,?,?,?,?,?,?,?,?)
+                insert into received_event(
+                        event_id,idempotency_key,source,source_service,event_type,schema_version,payload,processing_status,received_at,
+                        simulation_run_id,settlement_cycle_id,correlation_id,causation_id,hop_count,max_hop
+                    )
+                    values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     request.eventId(),
                     request.idempotencyKey(),
@@ -129,7 +169,13 @@ public class LedgerService {
                     request.schemaVersion() == null ? 1 : request.schemaVersion(),
                     write(request.payload()),
                     "RECEIVED",
-                    ts(receivedAt)
+                    ts(receivedAt),
+                    simulationRunId,
+                    settlementCycleId,
+                    correlationId,
+                    causationId,
+                    hopCount,
+                    maxHop
             );
             metrics.eventReceived();
 
@@ -201,6 +247,20 @@ public class LedgerService {
                     metadata.put("riskScore", normalized.riskScore());
                     metadata.put("totalCost", normalized.amount());
                     metadata.put("requiresColdChain", normalized.requiresColdChain());
+                    if (request.payload() != null) {
+                        metadata.put("orderId", request.payload().get("orderId"));
+                        metadata.put("paymentId", request.payload().get("paymentId"));
+                        metadata.put("customerId", request.payload().get("customerId"));
+                        metadata.put("returnId", request.payload().get("returnId"));
+                        metadata.put("claimId", request.payload().get("claimId"));
+                        metadata.put("customerType", request.payload().get("customerType"));
+                        metadata.put("simulationRunId", request.payload().get("simulationRunId"));
+                        metadata.put("settlementCycleId", request.payload().get("settlementCycleId"));
+                        metadata.put("correlationId", request.payload().get("correlationId"));
+                        metadata.put("causationId", request.payload().get("causationId"));
+                        metadata.put("hopCount", request.payload().get("hopCount"));
+                        metadata.put("maxHop", request.payload().get("maxHop"));
+                    }
                     archiveOs.requestApproval(approvalRequestId, transactionId, normalized.amount(), normalized.currency(),
                             normalized.reason(), metadata);
                     audit(transactionId, "Archive-Ledger", "ARCHIVEOS_APPROVAL_REQUESTED", "approval_request",
@@ -384,15 +444,21 @@ public class LedgerService {
     public ReconciliationView reconcile(LocalDate date) {
         Date day = Date.valueOf(date);
         int received = count("select count(*) from received_event where cast(received_at as date)=?", day);
-        int directEvents = count("select count(*) from received_event where cast(received_at as date)=? and coalesce(source_service, source)=?",
+        int nexusEvents = count("select count(*) from received_event where cast(received_at as date)=? and coalesce(source_service, source)=?",
                 day, SOURCE_NEXUS);
         int logisticsEvents = count("select count(*) from received_event where cast(received_at as date)=? and coalesce(source_service, source) in (?,?)",
                 day, SOURCE_LOGITICS, SOURCE_LOGISTICS);
+        int marketEvents = count("select count(*) from received_event where cast(received_at as date)=? and coalesce(source_service, source)=?",
+                day, SOURCE_MARKET);
         int created = count("select count(*) from finance_transaction where cast(created_at as date)=?", day);
         int directTransactions = count("select count(*) from finance_transaction where cast(created_at as date)=? and coalesce(source_service, 'Archive-Unknown')=?",
                 day, SOURCE_NEXUS);
+        int directEvents = count("select count(*) from received_event where cast(received_at as date)=? and coalesce(source_service, source)=?",
+                day, SOURCE_NEXUS);
         int logisticsTransactions = count("select count(*) from finance_transaction where cast(created_at as date)=? and coalesce(source_service, 'Archive-Unknown') in (?,?)",
                 day, SOURCE_LOGITICS, SOURCE_LOGISTICS);
+        int marketTransactions = count("select count(*) from finance_transaction where cast(created_at as date)=? and coalesce(source_service, 'Archive-Unknown')=?",
+                day, SOURCE_MARKET);
         int failed = count("select count(*) from received_event where processing_status='FAILED' and cast(received_at as date)=?", day);
         int duplicate = count("select count(*) from audit_log where action='DUPLICATE_EVENT' and cast(created_at as date)=?", day);
         int approval = count("select count(*) from finance_transaction where status='APPROVAL_REQUIRED' and cast(created_at as date)=?", day);
@@ -406,11 +472,12 @@ public class LedgerService {
                 insert into reconciliation_result(
                     reconciliation_date,nexus_event_count,received_event_count,created_transaction_count,
                     duplicate_event_count,failed_event_count,approval_required_count,settlement_ready_count,settled_count,mismatch_count,
-                    status,created_at,logistics_event_count,direct_event_count,logistics_transaction_count,direct_transaction_count
-                ) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    status,created_at,logistics_event_count,direct_event_count,logistics_transaction_count,direct_transaction_count,
+                    market_event_count,market_transaction_count
+                ) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 day,
-                directEvents,
+                nexusEvents,
                 received,
                 created,
                 duplicate,
@@ -424,7 +491,9 @@ public class LedgerService {
                 logisticsEvents,
                 directEvents,
                 logisticsTransactions,
-                directTransactions
+                directTransactions,
+                marketEvents,
+                marketTransactions
         );
         metrics.reconciliationMismatch(mismatch);
         return reconciliation(date);
@@ -564,6 +633,8 @@ public class LedgerService {
         long eventsFromNexus = count("select count(*) from received_event where coalesce(source_service, source)=?", SOURCE_NEXUS);
         long eventsFromLogitics = count("select count(*) from received_event where coalesce(source_service, source) in (?,?)",
                 SOURCE_LOGITICS, SOURCE_LOGISTICS);
+        long eventsFromMarket = count("select count(*) from received_event where coalesce(source_service, source)=?",
+                SOURCE_MARKET);
         long logisticsReceived = count("select count(*) from received_event where coalesce(source_service, source) in (?,?)",
                 SOURCE_LOGITICS, SOURCE_LOGISTICS);
         long logisticsCostTransactions = count("select count(*) from finance_transaction where transaction_type='LOGISTICS_COST' and coalesce(source_service, 'Archive-Unknown') in (?,?)",
@@ -576,6 +647,14 @@ public class LedgerService {
                 SOURCE_LOGITICS, SOURCE_LOGISTICS);
         long coldChainRiskTransactions = count("select count(*) from finance_transaction where transaction_type='COLD_CHAIN_RISK_COST' and coalesce(source_service, 'Archive-Unknown') in (?,?)",
                 SOURCE_LOGITICS, SOURCE_LOGISTICS);
+        long marketRevenueTransactions = count("select count(*) from finance_transaction where transaction_type='SALES_REVENUE' and coalesce(source_service, 'Archive-Unknown')=?",
+                SOURCE_MARKET);
+        long paymentCaptureTransactions = count("select count(*) from finance_transaction where transaction_type='PAYMENT_CAPTURE' and coalesce(source_service, 'Archive-Unknown')=?",
+                SOURCE_MARKET);
+        long refundTransactions = count("select count(*) from finance_transaction where transaction_type='SALES_REFUND' and coalesce(source_service, 'Archive-Unknown')=?",
+                SOURCE_MARKET);
+        long claimCompensationTransactions = count("select count(*) from finance_transaction where transaction_type='CLAIM_COMPENSATION_EXPENSE' and coalesce(source_service, 'Archive-Unknown')=?",
+                SOURCE_MARKET);
         String status = failed > 0 ? "DEGRADED" : "HEALTHY";
         return new OperationsSummary(
                 status,
@@ -589,18 +668,26 @@ public class LedgerService {
                 lastStatus,
                 eventsFromNexus,
                 eventsFromLogitics,
+                eventsFromMarket,
                 logisticsReceived,
                 logisticsCostTransactions,
                 urgentDeliveryTransactions,
                 delayPenaltyTransactions,
                 routeDeviationTransactions,
-                coldChainRiskTransactions
+                coldChainRiskTransactions,
+                marketRevenueTransactions,
+                paymentCaptureTransactions,
+                refundTransactions,
+                claimCompensationTransactions
         );
     }
 
     private Normalized normalize(NexusEventRequest request, String source) {
         if (isLogisticsRequest(request, source)) {
             return normalizeLogistics(request, source);
+        }
+        if (isMarketRequest(request, source)) {
+            return normalizeMarket(request, source);
         }
         return normalizeDirect(request, source);
     }
@@ -621,6 +708,22 @@ public class LedgerService {
         return SOURCE_LOGITICS.equals(source) || SOURCE_LOGISTICS.equals(source);
     }
 
+    private boolean isMarketRequest(NexusEventRequest request, String source) {
+        if (!SOURCE_MARKET.equals(source)) {
+            return false;
+        }
+        return "SALES_REVENUE_CONFIRMED".equals(request.eventType())
+                || "PAYMENT_CAPTURED".equals(request.eventType())
+                || "REFUND_REQUESTED".equals(request.eventType())
+                || "CLAIM_COMPENSATION_CONFIRMED".equals(request.eventType())
+                || "MARKET_SERVICE_FEE_PAID".equals(request.eventType())
+                || "PAYMENT_PROCESSING_FEE_PAID".equals(request.eventType());
+    }
+
+    private boolean isMarketSource(String source) {
+        return SOURCE_MARKET.equals(source);
+    }
+
     private void appendSourceFilter(StringBuilder sql, List<Object> args, String expression, String source) {
         if (isLogisticsSource(source)) {
             sql.append(" and ").append(expression).append(" in (?,?)");
@@ -630,6 +733,71 @@ public class LedgerService {
         }
         sql.append(" and ").append(expression).append("=?");
         args.add(source);
+    }
+
+    private Normalized normalizeMarket(NexusEventRequest request, String source) {
+        Map<String, Object> payload = request.payload();
+        if (payload == null) {
+            throw new IllegalArgumentException("Payload is required.");
+        }
+
+        String transactionType = switch (request.eventType()) {
+            case "SALES_REVENUE_CONFIRMED" -> "SALES_REVENUE";
+            case "PAYMENT_CAPTURED" -> "PAYMENT_CAPTURE";
+            case "REFUND_REQUESTED" -> "SALES_REFUND";
+            case "CLAIM_COMPENSATION_CONFIRMED" -> "CLAIM_COMPENSATION_EXPENSE";
+            case "MARKET_SERVICE_FEE_PAID" -> "MARKET_SERVICE_FEE";
+            case "PAYMENT_PROCESSING_FEE_PAID" -> "PAYMENT_PROCESSING_FEE";
+            default -> throw new IllegalArgumentException("Unsupported market event_type: " + request.eventType());
+        };
+
+        BigDecimal amount = decimalOrNull(payload.get("amount"));
+        if (amount == null) {
+            throw new IllegalArgumentException("amount is required for market events.");
+        }
+        if (amount.compareTo(BigDecimal.ZERO) <= 0) {
+            throw new IllegalArgumentException("amount must be greater than 0.");
+        }
+
+        BigDecimal riskScore = decimalOrNull(payload.get("riskScore"), BigDecimal.ZERO);
+        boolean requiresApproval = bool(payload.get("requiresApproval"), false);
+        boolean highRiskCustomer = bool(payload.get("highRiskCustomer"), false);
+        int riskLevel = parseInt(payload.get("riskLevel"), 0);
+        boolean criticalAmount = "CLAIM_COMPENSATION_CONFIRMED".equals(request.eventType()) && amount.compareTo(MARKET_APPROVAL_THRESHOLD) >= 0;
+        boolean isClaimLarge = "CLAIM_COMPENSATION_CONFIRMED".equals(request.eventType()) && amount.compareTo(MARKET_APPROVAL_THRESHOLD) >= 0;
+        boolean approvalRequired = requiresApproval
+                || amount.compareTo(MARKET_APPROVAL_THRESHOLD) >= 0
+                || riskScore.compareTo(LOGISTICS_LOW_RISK_SCORE) >= 0
+                || highRiskCustomer
+                || riskLevel >= 4
+                || "REFUND_REQUESTED".equals(request.eventType()) && amount.compareTo(MARKET_APPROVAL_THRESHOLD) >= 0
+                || isClaimLarge;
+
+        String reason = string(payload, "reason", "Synthetic market event confirmed");
+        String approvalReason = buildMarketApprovalReason(approvalRequired, request.eventType(), amount, riskScore, highRiskCustomer, riskLevel, criticalAmount);
+
+        return new Normalized(
+                transactionType,
+                string(payload, "factoryId", null),
+                string(payload, "vendorId", null),
+                string(payload, "syntheticAccountId", null),
+                string(payload, "routePlanId", null),
+                string(payload, "shipmentId", null),
+                string(payload, "originCode", null),
+                string(payload, "destinationCode", null),
+                riskScore,
+                approvalReason,
+                approvalRequired,
+                approvalRequired ? "APPROVAL_REQUIRED" : "SETTLEMENT_READY",
+                reason,
+                request.occurredAt() == null ? Instant.now() : request.occurredAt(),
+                source,
+                request.eventType(),
+                "NORMAL",
+                false,
+                amount.setScale(2, RoundingMode.HALF_UP),
+                string(payload, "currency", "KRW")
+        );
     }
 
     private Normalized normalizeLogistics(NexusEventRequest request, String source) {
@@ -730,6 +898,22 @@ public class LedgerService {
         return "Approval required: " + String.join(",", reasons);
     }
 
+    private String buildMarketApprovalReason(boolean approvalRequired, String eventType, BigDecimal amount, BigDecimal riskScore,
+                                            boolean highRiskCustomer, int riskLevel, boolean criticalClaim) {
+        if (!approvalRequired) {
+            return "Market event accepted.";
+        }
+        List<String> reasons = new ArrayList<>();
+        if (amount.compareTo(MARKET_APPROVAL_THRESHOLD) >= 0) reasons.add("amount>=300000");
+        if (riskScore.compareTo(LOGISTICS_LOW_RISK_SCORE) >= 0) reasons.add("riskScore>=0.85");
+        if (highRiskCustomer) reasons.add("highRiskCustomer=true");
+        if (riskLevel >= 4) reasons.add("riskLevel>=4");
+        if ("REFUND_REQUESTED".equals(eventType) && amount.compareTo(MARKET_APPROVAL_THRESHOLD) >= 0) reasons.add("refundAmountHigh");
+        if ("CLAIM_COMPENSATION_CONFIRMED".equals(eventType) && amount.compareTo(MARKET_APPROVAL_THRESHOLD) >= 0) reasons.add("claimAmountHigh");
+        if (criticalClaim) reasons.add("claimCompensationHigh");
+        return "Approval required: " + String.join(",", reasons);
+    }
+
     private Normalized normalizeDirect(NexusEventRequest request, String source) {
         Map<String, Object> payload = request.payload();
         if (payload == null) {
@@ -818,6 +1002,12 @@ public class LedgerService {
             case "ROUTE_DEVIATION_COST" -> new Account("ROUTE_DEVIATION_EXPENSE", "Synthetic Route Deviation Expense");
             case "COLD_CHAIN_RISK_COST" -> new Account("COLD_CHAIN_RISK_EXPENSE", "Synthetic Cold Chain Risk Expense");
             case "LOGISTICS_DAILY_SETTLEMENT_FEE" -> new Account("LOGISTICS_SETTLEMENT_EXPENSE", "Synthetic Logistics Settlement Expense");
+            case "SALES_REVENUE" -> new Account("ACCOUNTS_RECEIVABLE", "Synthetic Accounts Receivable");
+            case "PAYMENT_CAPTURE" -> new Account("CASH", "Synthetic Cash");
+            case "SALES_REFUND" -> new Account("SALES_REFUND", "Synthetic Sales Refund");
+            case "CLAIM_COMPENSATION_EXPENSE" -> new Account("CLAIM_COMPENSATION_EXPENSE", "Synthetic Claim Compensation Expense");
+            case "MARKET_SERVICE_FEE" -> new Account("MARKET_SERVICE_FEE_EXPENSE", "Synthetic Market Service Fee Expense");
+            case "PAYMENT_PROCESSING_FEE" -> new Account("PAYMENT_PROCESSING_EXPENSE", "Synthetic Payment Processing Expense");
             case "MAINTENANCE_EXPENSE" -> new Account("MAINTENANCE_EXPENSE", "Synthetic Maintenance Expense");
             case "QUALITY_LOSS", "QUALITY_CLAIM_CHARGEBACK" -> new Account("QUALITY_LOSS", "Synthetic Quality Loss");
             case "SHIPMENT_HOLD_COST" -> new Account("LOGISTICS_EXPENSE", "Synthetic Logistics Expense");
@@ -832,6 +1022,12 @@ public class LedgerService {
         return switch (type) {
             case "CORPORATE_CARD_EXPENSE" -> new Account("CORPORATE_CARD_PAYABLE", "Synthetic Corporate Card Payable");
             case "VENDOR_PAYMENT" -> new Account("CASH_CLEARING", "Synthetic Cash Clearing");
+            case "SALES_REVENUE" -> new Account("SALES_REVENUE", "Synthetic Sales Revenue");
+            case "PAYMENT_CAPTURE" -> new Account("ACCOUNTS_RECEIVABLE", "Synthetic Accounts Receivable");
+            case "SALES_REFUND" -> new Account("REFUND_PAYABLE", "Synthetic Refund Payable");
+            case "CLAIM_COMPENSATION_EXPENSE" -> new Account("ACCOUNTS_PAYABLE", "Synthetic Accounts Payable");
+            case "MARKET_SERVICE_FEE" -> new Account("ACCOUNTS_PAYABLE", "Synthetic Accounts Payable");
+            case "PAYMENT_PROCESSING_FEE" -> new Account("CASH", "Synthetic Cash");
             default -> new Account("ACCOUNTS_PAYABLE", "Synthetic Accounts Payable");
         };
     }
@@ -942,6 +1138,8 @@ public class LedgerService {
                 rs.getInt("direct_event_count"),
                 rs.getInt("logistics_transaction_count"),
                 rs.getInt("direct_transaction_count"),
+                rs.getInt("market_event_count"),
+                rs.getInt("market_transaction_count"),
                 rs.getInt("duplicate_event_count"),
                 rs.getInt("failed_event_count"),
                 rs.getInt("approval_required_count"),
@@ -1003,6 +1201,37 @@ public class LedgerService {
     private BigDecimal decimalOrNull(Object value, BigDecimal fallback) {
         BigDecimal parsed = decimalOrNull(value);
         return parsed == null ? fallback : parsed;
+    }
+
+    private String text(Object value) {
+        if (value == null) {
+            return null;
+        }
+        String text = String.valueOf(value);
+        return text.isBlank() ? null : text;
+    }
+
+    private int parseInt(Object value, int fallback) {
+        if (value == null) {
+            return fallback;
+        }
+        try {
+            if (value instanceof Number number) {
+                return number.intValue();
+            }
+            return Integer.parseInt(String.valueOf(value));
+        } catch (NumberFormatException error) {
+            return fallback;
+        }
+    }
+
+    private boolean isCorrelationDuplicate(String source, String eventType, String correlationId) {
+        return exists(
+                "select count(*) from received_event where coalesce(source_service, source)=? and event_type=? and correlation_id=?",
+                source,
+                eventType,
+                correlationId
+        );
     }
 
     private BigDecimal firstNonNull(BigDecimal... values) {

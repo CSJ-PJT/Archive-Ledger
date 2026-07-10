@@ -62,3 +62,19 @@ Expected:
 - only `SETTLEMENT_READY` transactions are settled
 - `APPROVAL_REQUIRED` and `REJECTED` transactions are excluded
 - duplicate observations do not inflate mismatch
+
+## Market Event Smoke
+
+```powershell
+$marketPayload = '{"source":"Archive-Market","events":[{"eventId":"evt-market-smoke-001","idempotencyKey":"MARKET:SALES_REVENUE_CONFIRMED:ORDER-M-001","source":"Archive-Market","eventType":"SALES_REVENUE_CONFIRMED","schemaVersion":1,"occurredAt":"2026-01-15T10:45:00.000Z","payload":{"orderId":"ORDER-M-001","amount":120000,"currency":"KRW","factoryId":"FAC-A","originCode":"FAC-A","destinationCode":"DC-SEOUL-01"}}]}'
+curl.exe -X POST "http://localhost:18080/api/events/market/bulk" -H "Content-Type: application/json" -d $marketPayload
+curl.exe "http://localhost:18080/api/transactions?source=Archive-Market"
+curl.exe "http://localhost:18080/api/ledger/summary?source=Archive-Market"
+curl.exe "http://localhost:18080/api/operations/summary"
+```
+
+Expected:
+
+- Market transaction created (`SALES_REVENUE`)
+- ledger entries are balanced
+- operations summary reflects `eventsReceivedFromMarket` and `marketRevenueTransactions`

@@ -43,15 +43,31 @@ Behavior:
 ```powershell
 curl.exe "http://localhost:18080/api/events/received?source=Archive-Nexus"
 curl.exe "http://localhost:18080/api/events/received?source=Archive-Logitics"
+curl.exe "http://localhost:18080/api/events/received?source=Archive-Market"
 ```
 
 Use `Archive-Logitics` only as the compatibility source value for persisted Logistics events. New events may use `Archive-Logistics`; Ledger counts and filters both source literals as Logistics.
+
+`Archive-Market` queries should be used for commerce/claim/fee transactions and for operations separation checks:
+
+```powershell
+curl.exe "http://localhost:18080/api/operations/summary" | ConvertFrom-Json | ConvertTo-Json -Depth 3
+```
+
+Key fields to watch:
+
+- `eventsReceivedFromMarket`
+- `marketRevenueTransactions`
+- `paymentCaptureTransactions`
+- `refundTransactions`
+- `claimCompensationTransactions`
 
 ## Transaction Triage
 
 ```powershell
 curl.exe "http://localhost:18080/api/transactions?status=APPROVAL_REQUIRED"
 curl.exe "http://localhost:18080/api/transactions?status=SETTLEMENT_READY"
+curl.exe "http://localhost:18080/api/transactions?source=Archive-Market"
 curl.exe "http://localhost:18080/api/transactions?source=Archive-Logitics"
 ```
 
@@ -66,6 +82,7 @@ If settlement is not picking up an expected transaction, confirm:
 ```powershell
 curl.exe "http://localhost:18080/api/ledger/summary?source=Archive-Logitics"
 curl.exe "http://localhost:18080/api/ledger/summary?source=Archive-Nexus"
+curl.exe "http://localhost:18080/api/ledger/summary?source=Archive-Market"
 ```
 
 `totalDebit` should equal `totalCredit` for the queried scope.

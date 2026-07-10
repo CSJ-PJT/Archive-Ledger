@@ -25,6 +25,28 @@ This document describes how accepted events become finance transactions and doub
 | `COLD_CHAIN_RISK_COST` | `COLD_CHAIN_RISK_EXPENSE` | `ACCOUNTS_PAYABLE` |
 | `LOGISTICS_DAILY_SETTLEMENT_FEE` | `LOGISTICS_SETTLEMENT_EXPENSE` | `ACCOUNTS_PAYABLE` |
 
+## Market Event Mapping
+
+| Market eventType | transactionType |
+| --- | --- |
+| `SALES_REVENUE_CONFIRMED` | `SALES_REVENUE` |
+| `PAYMENT_CAPTURED` | `PAYMENT_CAPTURE` |
+| `REFUND_REQUESTED` | `SALES_REFUND` |
+| `CLAIM_COMPENSATION_CONFIRMED` | `CLAIM_COMPENSATION_EXPENSE` |
+| `MARKET_SERVICE_FEE_PAID` | `MARKET_SERVICE_FEE` |
+| `PAYMENT_PROCESSING_FEE_PAID` | `PAYMENT_PROCESSING_FEE` |
+
+## Market Ledger Accounts
+
+| transactionType | debit account | credit account |
+| --- | --- | --- |
+| `SALES_REVENUE` | `ACCOUNTS_RECEIVABLE` | `SALES_REVENUE` |
+| `PAYMENT_CAPTURE` | `CASH` | `ACCOUNTS_RECEIVABLE` |
+| `SALES_REFUND` | `SALES_REFUND` | `REFUND_PAYABLE` |
+| `CLAIM_COMPENSATION_EXPENSE` | `CLAIM_COMPENSATION_EXPENSE` | `ACCOUNTS_PAYABLE` |
+| `MARKET_SERVICE_FEE` | `MARKET_SERVICE_FEE_EXPENSE` | `ACCOUNTS_PAYABLE` |
+| `PAYMENT_PROCESSING_FEE` | `PAYMENT_PROCESSING_EXPENSE` | `CASH` |
+
 ## Direct Nexus Mapping
 
 Direct Nexus events retain the existing Ledger direct mapping. Examples include maintenance, shipment hold, emergency purchase, and corporate card-style synthetic operating expenses.

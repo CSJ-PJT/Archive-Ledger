@@ -10,6 +10,8 @@ Base URL: `http://localhost:18080`
 | POST | `/api/events/nexus/bulk` | Ingest Nexus direct events as an array |
 | POST | `/api/events/logistics` | Ingest one Logistics cost event |
 | POST | `/api/events/logistics/bulk` | Ingest Logistics cost events in `{ source, events }` format |
+| POST | `/api/events/market` | Ingest one Market event |
+| POST | `/api/events/market/bulk` | Ingest Market events in `{ source, events }` format |
 | GET | `/api/events/received` | List recent received events |
 | GET | `/api/events/received/{eventId}` | Get one received event |
 
@@ -17,6 +19,7 @@ Supported filters:
 
 - `GET /api/events/received?source=Archive-Nexus`
 - `GET /api/events/received?source=Archive-Logitics`
+- `GET /api/events/received?source=Archive-Market`
 
 ## Transactions
 
@@ -35,6 +38,7 @@ Examples:
 ```powershell
 curl.exe "http://localhost:18080/api/transactions?status=APPROVAL_REQUIRED"
 curl.exe "http://localhost:18080/api/transactions?source=Archive-Logitics"
+curl.exe "http://localhost:18080/api/transactions?source=Archive-Market"
 ```
 
 ## Ledger

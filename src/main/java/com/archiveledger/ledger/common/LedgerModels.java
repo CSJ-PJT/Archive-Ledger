@@ -32,6 +32,12 @@ public final class LedgerModels {
     ) {
     }
 
+    public record MarketBulkRequest(
+            String source,
+            @NotNull List<NexusEventRequest> events
+    ) {
+    }
+
     public record EventIngestionResponse(String eventId, String status, String transactionId, boolean duplicate, String message) {
     }
 
@@ -82,17 +88,20 @@ public final class LedgerModels {
 
     public record ReconciliationView(LocalDate date, int nexusEvents, int receivedEvents, int createdTransactions,
                                      int logisticsEventCount, int directEventCount, int logisticsTransactionCount,
-                                     int directTransactionCount, int duplicates, int failed, int approvalRequired,
+                                     int directTransactionCount, int marketEventCount, int marketTransactionCount,
+                                     int duplicates, int failed, int approvalRequired,
                                      int settlementReady, int settled, int mismatch, String status, Instant createdAt) {
     }
 
     public record OperationsSummary(String status, long receivedEvents, long transactions, long duplicates,
                                     long approvalRequired, long settled, long failed, Instant lastSettlementAt,
                                     String lastReconciliationStatus,
-                                    long eventsReceivedFromNexus, long eventsReceivedFromLogitics,
+                                    long eventsReceivedFromNexus, long eventsReceivedFromLogitics, long eventsReceivedFromMarket,
                                     long logisticsReceivedEvents, long logisticsCostTransactions,
                                     long urgentDeliveryTransactions, long delayPenaltyTransactions,
-                                    long routeDeviationTransactions, long coldChainRiskTransactions) {
+                                    long routeDeviationTransactions, long coldChainRiskTransactions,
+                                    long marketRevenueTransactions, long paymentCaptureTransactions,
+                                    long refundTransactions, long claimCompensationTransactions) {
     }
 
     public record BulkIngestionResponse(int received, int accepted, int duplicate, int failed,

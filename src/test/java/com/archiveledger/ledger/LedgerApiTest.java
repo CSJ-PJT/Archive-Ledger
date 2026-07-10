@@ -578,6 +578,173 @@ class LedgerApiTest {
     }
 
     @Test
+    void marketSalesRevenueEventFromArchiveMarketCreatesSalesTransactionAndAccounts() throws Exception {
+        String eventId = logisticsEventId().replace("LG", "MK");
+        String idempotency = logisticsIdempotency().replace("LG", "MK");
+        mvc.perform(post("/api/events/market").contentType(MediaType.APPLICATION_JSON).content(
+                        mapper.writeValueAsString(marketEvent("Archive-Market", eventId, idempotency, "SALES_REVENUE_CONFIRMED", Map.of(
+                                "orderId", "ORDER-" + nextId("ORD"),
+                                "factoryId", "FAC-A",
+                                "originCode", "FAC-A",
+                                "destinationCode", "DC-SEOUL-01",
+                                "amount", 120_000L
+                        )))))
+                .andExpect(status().isOk());
+
+        String transactionId = transactionId(eventId);
+        assertThat(jdbc.queryForObject("select transaction_type from finance_transaction where transaction_id=?", String.class, transactionId))
+                .isEqualTo("SALES_REVENUE");
+        assertThat(accountCodes(transactionId)).containsExactlyInAnyOrder("ACCOUNTS_RECEIVABLE", "SALES_REVENUE");
+        assertThat(transactionAmount(eventId)).isEqualTo(BigDecimal.valueOf(120_000L).setScale(2));
+    }
+
+    @Test
+    void marketPaymentCapturedMapsToCashAndAccountsReceivable() throws Exception {
+        String eventId = logisticsEventId().replace("LG", "MK");
+        String idempotency = logisticsIdempotency().replace("LG", "MK");
+        mvc.perform(post("/api/events/market").contentType(MediaType.APPLICATION_JSON).content(
+                        mapper.writeValueAsString(marketEvent("Archive-Market", eventId, idempotency, "PAYMENT_CAPTURED", Map.of(
+                                "orderId", "ORDER-" + nextId("ORD"),
+                                "factoryId", "FAC-B",
+                                "originCode", "FAC-B",
+                                "destinationCode", "DC-SEOUL-01",
+                                "amount", 58_000L
+                        )))))
+                .andExpect(status().isOk());
+
+        String transactionId = transactionId(eventId);
+        assertThat(jdbc.queryForObject("select transaction_type from finance_transaction where transaction_id=?", String.class, transactionId))
+                .isEqualTo("PAYMENT_CAPTURE");
+        assertThat(accountCodes(transactionId)).containsExactlyInAnyOrder("CASH", "ACCOUNTS_RECEIVABLE");
+    }
+
+    @Test
+    void marketRefundRequestedBecomesSalesRefundAndRequiresApprovalWhenOverThreshold() throws Exception {
+        String eventId = logisticsEventId().replace("LG", "MK");
+        String idempotency = logisticsIdempotency().replace("LG", "MK");
+        mvc.perform(post("/api/events/market").contentType(MediaType.APPLICATION_JSON).content(
+                        mapper.writeValueAsString(marketEvent("Archive-Market", eventId, idempotency, "REFUND_REQUESTED", Map.of(
+                                "returnId", "RET-" + nextId("RET"),
+                                "orderId", "ORDER-" + nextId("ORD"),
+                                "amount", 350_000L,
+                                "riskScore", 0.15
+                        )))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("ACCEPTED"));
+
+        assertThat(transactionStatus(eventId)).isEqualTo("APPROVAL_REQUIRED");
+        assertThat(accountCodes(transactionId(eventId))).containsExactlyInAnyOrder("SALES_REFUND", "REFUND_PAYABLE");
+    }
+
+    @Test
+    void marketClaimCompensationHighRiskRequiresApprovalAndExcludesSettlement() throws Exception {
+        clearTablesForDeterministicReconciliation();
+
+        String approvalEventId = logisticsEventId().replace("LG", "MK");
+        String readyEventId = logisticsEventId().replace("LG", "MK");
+
+        mvc.perform(post("/api/events/market").contentType(MediaType.APPLICATION_JSON).content(
+                        mapper.writeValueAsString(marketEvent("Archive-Market", approvalEventId, logisticsIdempotency().replace("LG", "MK"),
+                                "CLAIM_COMPENSATION_CONFIRMED", Map.of(
+                                        "claimId", "CLM-" + nextId("CLM"),
+                                        "orderId", "ORDER-" + nextId("ORD"),
+                                        "customerType", "VIP",
+                                        "highRiskCustomer", true,
+                                        "amount", 420_000L,
+                                        "currency", "KRW"
+                                )))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("ACCEPTED"));
+        mvc.perform(post("/api/events/market").contentType(MediaType.APPLICATION_JSON).content(
+                        mapper.writeValueAsString(marketEvent("Archive-Market", readyEventId, logisticsIdempotency().replace("LG", "MK"),
+                                "SALES_REVENUE_CONFIRMED", Map.of(
+                                        "orderId", "ORDER-" + nextId("ORD"),
+                                        "amount", 200_000L
+                                )))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("ACCEPTED"));
+
+        mvc.perform(post("/api/batches/daily/run")
+                        .param("date", LocalDate.now().toString())
+                        .param("approvedBy", "dan18"))
+                .andExpect(status().isOk());
+        assertThat(transactionStatus(approvalEventId)).isEqualTo("APPROVAL_REQUIRED");
+        assertThat(transactionStatus(readyEventId)).isEqualTo("SETTLED");
+    }
+
+    @Test
+    void marketFeeEventsAreProcessedWithFeeAccountsAndNotDoubleCharged() throws Exception {
+        String eventId = logisticsEventId().replace("LG", "MK");
+        String idempotency = logisticsIdempotency().replace("LG", "MK");
+        mvc.perform(post("/api/events/market").contentType(MediaType.APPLICATION_JSON).content(
+                        mapper.writeValueAsString(marketEvent("Archive-Market", eventId, idempotency, "MARKET_SERVICE_FEE_PAID", Map.of(
+                                "orderId", "ORDER-" + nextId("ORD"),
+                                "amount", 55_000L,
+                                "vendorId", "VENDOR-SERVICE-01"
+                        )))))
+                .andExpect(status().isOk());
+
+        String tx = transactionId(eventId);
+        assertThat(accountCodes(tx)).containsExactlyInAnyOrder("MARKET_SERVICE_FEE_EXPENSE", "ACCOUNTS_PAYABLE");
+        assertThat(jdbc.queryForObject("select status from finance_transaction where transaction_id=?", String.class, tx))
+                .isEqualTo("SETTLEMENT_READY");
+        assertThat(sum("coalesce(sum(debit_amount),0)", tx)).isEqualTo(sum("coalesce(sum(credit_amount),0)", tx));
+    }
+
+    @Test
+    void marketAmountMissingReturnsFailed() throws Exception {
+        String eventId = logisticsEventId().replace("LG", "MK");
+        String idempotency = logisticsIdempotency().replace("LG", "MK");
+        mvc.perform(post("/api/events/market").contentType(MediaType.APPLICATION_JSON).content(
+                        mapper.writeValueAsString(marketEvent("Archive-Market", eventId, idempotency, "PAYMENT_CAPTURED", Map.of(
+                                "orderId", "ORDER-" + nextId("ORD"),
+                                "factoryId", "FAC-A"
+                        )))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("FAILED"));
+    }
+
+    @Test
+    void marketDuplicateIdempotencyNotCreateDuplicateEntries() throws Exception {
+        String eventId = logisticsEventId().replace("LG", "MK");
+        String idempotency = logisticsIdempotency().replace("LG", "MK");
+        String body = mapper.writeValueAsString(marketEvent("Archive-Market", eventId, idempotency, "PAYMENT_PROCESSING_FEE_PAID", Map.of(
+                "orderId", "ORDER-" + nextId("ORD"),
+                "amount", 20_000L,
+                "paymentId", "PAY-" + nextId("PAY")
+        )));
+
+        mvc.perform(post("/api/events/market").contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("ACCEPTED"));
+        mvc.perform(post("/api/events/market").contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("DUPLICATE"));
+
+        assertThat(count("select count(*) from finance_transaction where source_event_id=?", eventId)).isEqualTo(1);
+    }
+
+    @Test
+    void marketOperationSummaryAndReconciliationIncludeMarketCounts() throws Exception {
+        mvc.perform(post("/api/events/market").contentType(MediaType.APPLICATION_JSON).content(
+                        mapper.writeValueAsString(marketEvent("Archive-Market", logisticsEventId().replace("LG", "MK"), logisticsIdempotency().replace("LG", "MK"),
+                                "PAYMENT_CAPTURED", Map.of("orderId", "ORDER-" + nextId("ORD"), "amount", 30_000L)))))
+                .andExpect(status().isOk());
+
+        mvc.perform(get("/api/operations/summary"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.eventsReceivedFromMarket").value(Matchers.greaterThanOrEqualTo(1)))
+                .andExpect(jsonPath("$.paymentCaptureTransactions").value(Matchers.greaterThanOrEqualTo(1)));
+
+        String summary = mvc.perform(get("/api/reconciliation/daily").param("date", LocalDate.now().toString()))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+        JsonNode summaryNode = mapper.readTree(summary);
+        assertThat(summaryNode.get("marketEventCount").asInt()).isGreaterThanOrEqualTo(1);
+        assertThat(summaryNode.get("marketTransactionCount").asInt()).isGreaterThanOrEqualTo(1);
+    }
+
+    @Test
     void compatibilityDispatchedEventFromArchiveLogiticsMapsToLogisticsCost() throws Exception {
         String eventId = logisticsEventId();
         String idempotency = logisticsIdempotency();
@@ -620,6 +787,7 @@ class LedgerApiTest {
 
     @Test
     void reconciliationSummaryIncludesLogisticsEventCount() throws Exception {
+        clearTablesForDeterministicReconciliation();
         String eventId = logisticsEventId();
         String idempotency = logisticsIdempotency();
         mvc.perform(post("/api/events/logistics").contentType(MediaType.APPLICATION_JSON).content(
@@ -723,6 +891,28 @@ class LedgerApiTest {
         payload.put("priority", "NORMAL");
         payload.put("requiresColdChain", false);
         payload.put("delayed", false);
+        payload.putAll(overrides);
+
+        Map<String, Object> request = new LinkedHashMap<>();
+        request.put("eventId", eventId);
+        request.put("idempotencyKey", idempotencyKey);
+        request.put("eventType", eventType);
+        request.put("aggregateType", "SyntheticAggregate");
+        request.put("aggregateId", "AGG-" + eventId);
+        request.put("source", source);
+        request.put("schemaVersion", 1);
+        request.put("payload", payload);
+        request.put("occurredAt", OffsetDateTime.now().toString());
+        return request;
+    }
+
+    private Map<String, Object> marketEvent(String source, String eventId, String idempotencyKey, String eventType, Map<String, Object> overrides) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("factoryId", "FAC-MK");
+        payload.put("vendorId", "VENDOR-MARKET-01");
+        payload.put("currency", "KRW");
+        payload.put("originCode", "FAC-MK");
+        payload.put("destinationCode", "DC-SEOUL-01");
         payload.putAll(overrides);
 
         Map<String, Object> request = new LinkedHashMap<>();

@@ -39,6 +39,16 @@ public class LedgerController {
         return ledger.ingestLogisticsBulk(request);
     }
 
+    @PostMapping("/events/market")
+    EventIngestionResponse ingestMarket(@Valid @RequestBody NexusEventRequest request) {
+        return ledger.ingestMarket(request);
+    }
+
+    @PostMapping("/events/market/bulk")
+    BulkIngestionResponse ingestMarketBulk(@Valid @RequestBody MarketBulkRequest request) {
+        return ledger.ingestMarketBulk(request);
+    }
+
     @GetMapping("/events/received")
     List<ReceivedEventView> receivedEvents(@RequestParam(required = false) String source) {
         return ledger.receivedEvents(source);
