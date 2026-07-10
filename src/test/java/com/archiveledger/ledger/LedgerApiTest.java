@@ -949,8 +949,23 @@ class LedgerApiTest {
                         .param("sourceService", "ArchiveOS"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.workforceEnabled").value(false))
+                .andExpect(jsonPath("$.available").value(true))
+                .andExpect(jsonPath("$.totalHeadcount").value(0))
+                .andExpect(jsonPath("$.roles").isArray())
                 .andExpect(jsonPath("$.baselineCapacity").value(500))
-                .andExpect(jsonPath("$.allocatedCapacity").value(500));
+                .andExpect(jsonPath("$.allocatedCapacity").value(500))
+                .andExpect(jsonPath("$.effectiveCapacity").value(0))
+                .andExpect(jsonPath("$.usedCapacity").value(0))
+                .andExpect(jsonPath("$.remainingCapacity").value(0));
+
+        mvc.perform(get("/api/productivity/summary")
+                        .param("date", workDate.toString())
+                        .param("sourceService", "ArchiveOS"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.service").value("Archive-Ledger"))
+                .andExpect(jsonPath("$.productivityScore").exists())
+                .andExpect(jsonPath("$.transactionsProcessed").exists())
+                .andExpect(jsonPath("$.reconciliationWarnings").exists());
 
         Map<String, Object> allocation = new LinkedHashMap<>();
         allocation.put("workdayId", workdayId);
@@ -983,8 +998,41 @@ class LedgerApiTest {
                 .andExpect(jsonPath("$.workforceEnabled").value(true))
                 .andExpect(jsonPath("$.activeAllocations").value(1))
                 .andExpect(jsonPath("$.assignedUnits").value(2))
-                .andExpect(jsonPath("$.allocatedCapacity").value(580))
+                .andExpect(jsonPath("$.totalHeadcount").value(2))
+                .andExpect(jsonPath("$.allocatedCapacity").value(560))
+                .andExpect(jsonPath("$.effectiveCapacity").value(60))
+                .andExpect(jsonPath("$.approvalReviewerCapacity").value(60))
                 .andExpect(jsonPath("$.dailyOperatingCostKrw").value(200000.00));
+    }
+
+    @Test
+    void workforceSummaryApisAreReadOnlyAndExposeApprovalBottleneck() throws Exception {
+        clearTablesForDeterministicReconciliation();
+        LocalDate workDate = LocalDate.of(2031, 1, 5);
+        insertSyntheticTransactions(workDate, "APPROVAL_REQUIRED", 35);
+        long beforeAudit = count("select count(*) from audit_log");
+        long beforeWorkday = count("select count(*) from ledger_workday_result");
+        long beforeSettlement = count("select count(*) from settlement_batch");
+
+        mvc.perform(get("/api/workforce/summary")
+                        .param("date", workDate.toString())
+                        .param("sourceService", "ArchiveOS"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("HEALTHY"))
+                .andExpect(jsonPath("$.approvalBacklog").value(5))
+                .andExpect(jsonPath("$.bottleneckRole").value("APPROVAL_REVIEWER"))
+                .andExpect(jsonPath("$.latestEventAt").exists());
+
+        mvc.perform(get("/api/capacity/summary")
+                        .param("date", workDate.toString())
+                        .param("sourceService", "ArchiveOS"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.capacityUtilizationRate").exists())
+                .andExpect(jsonPath("$.remainingCapacity").exists());
+
+        assertThat(count("select count(*) from audit_log")).isEqualTo(beforeAudit);
+        assertThat(count("select count(*) from ledger_workday_result")).isEqualTo(beforeWorkday);
+        assertThat(count("select count(*) from settlement_batch")).isEqualTo(beforeSettlement);
     }
 
     @Test
@@ -1000,8 +1048,8 @@ class LedgerApiTest {
                 .andExpect(jsonPath("$.baselineCapacity").value(500))
                 .andExpect(jsonPath("$.allocatedCapacity").value(500))
                 .andExpect(jsonPath("$.demandCount").value(505))
-                .andExpect(jsonPath("$.processedCount").value(500))
-                .andExpect(jsonPath("$.backlogCount").value(5))
+                .andExpect(jsonPath("$.processedCount").value(50))
+                .andExpect(jsonPath("$.backlogCount").value(455))
                 .andExpect(jsonPath("$.status").value("BOTTLENECK_DETECTED"));
 
         String workdayId = "LEDGER-WORKDAY-" + nextId("WF");
@@ -1013,6 +1061,7 @@ class LedgerApiTest {
                                 "sourceService", "ArchiveOS",
                                 "role", "SETTLEMENT_OPERATOR",
                                 "assignedUnits", 5,
+                                "capacityPerPersonPerDay", 120,
                                 "unitCostKrw", 120_000,
                                 "productivityMultiplier", 1.0,
                                 "enabled", true

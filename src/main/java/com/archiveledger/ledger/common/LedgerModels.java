@@ -238,12 +238,19 @@ public final class LedgerModels {
     public record WorkforceSummary(
             String service,
             String sourceService,
+            boolean available,
             boolean workforceEnabled,
             int activeAllocations,
             int assignedUnits,
+            int totalHeadcount,
+            List<WorkforceRoleSummary> roles,
             BigDecimal dailyOperatingCostKrw,
             int baselineCapacity,
             int allocatedCapacity,
+            int effectiveCapacity,
+            int usedCapacity,
+            int remainingCapacity,
+            BigDecimal capacityUtilizationRate,
             int demandCount,
             int backlogCount,
             int transactionsBacklog,
@@ -256,7 +263,25 @@ public final class LedgerModels {
             BigDecimal payrollCost,
             String status,
             int approvalReviewerCapacity,
-            int settlementOperatorCapacity
+            int settlementOperatorCapacity,
+            Instant latestEventAt,
+            int transactionsProcessed,
+            int approvalReviewed,
+            int settlementsCompleted,
+            int reconciliationWarnings,
+            int callbackFailed
+    ) {
+    }
+
+    public record WorkforceRoleSummary(
+            String roleType,
+            int allocatedHeadcount,
+            int capacityPerPersonPerDay,
+            BigDecimal productivityScore,
+            BigDecimal wagePerDay,
+            int effectiveCapacity,
+            int usedCapacity,
+            int remainingCapacity
     ) {
     }
 

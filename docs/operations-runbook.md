@@ -7,6 +7,9 @@ curl.exe http://localhost:18080/process.html
 curl.exe http://localhost:18080/actuator/health
 curl.exe http://localhost:18080/api/operations/summary
 curl.exe http://localhost:18080/api/reconciliation/summary
+curl.exe http://localhost:18080/api/workforce/summary
+curl.exe http://localhost:18080/api/productivity/summary
+curl.exe http://localhost:18080/api/capacity/summary
 ```
 
 Check:
@@ -16,8 +19,30 @@ Check:
 - duplicate count is explainable by retries
 - last reconciliation status is `OK` or an explainable `WARNING`
 - approval required count is expected before settlement
+- ArchiveOS Workforce Overview summary APIs return HTTP 200
 
 The browser dashboard at `/process.html` shows these same checks visually and refreshes every 30 seconds.
+
+## Workforce Overview
+
+ArchiveOS reads these Ledger endpoints as read-only runtime summaries:
+
+```powershell
+curl.exe http://localhost:18080/api/workforce/summary
+curl.exe http://localhost:18080/api/productivity/summary
+curl.exe http://localhost:18080/api/capacity/summary
+```
+
+Expected:
+
+- `available=true`
+- missing allocation returns `totalHeadcount=0` and `roles=[]`
+- approval backlog maps to `bottleneckRole=APPROVAL_REVIEWER`
+- settlement backlog maps to `bottleneckRole=SETTLEMENT_OPERATOR`
+- reconciliation warning maps to `bottleneckRole=RECONCILIATION_ANALYST`
+- callback failure maps to `bottleneckRole=CALLBACK_OPERATOR`
+
+These GET APIs must not run settlement, reconciliation, approval callback, or fee creation.
 
 ## Automatic Daily Cycle
 

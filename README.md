@@ -160,6 +160,25 @@ External Synthetic Events
 | `GET` | `/actuator/health` | health check |
 | `GET` | `/actuator/metrics` | metrics |
 
+### ArchiveOS Workforce Overview
+
+ArchiveOS는 다음 Ledger read-only API를 호출해 정산 처리량, 승인 병목, 대사 병목, callback 실패를 수집합니다.
+
+```text
+GET /api/workforce/summary
+GET /api/productivity/summary
+GET /api/capacity/summary
+```
+
+세 API는 데이터가 없어도 HTTP 200과 default summary를 반환합니다. 조회 중 settlement, reconciliation, approval callback, fee 생성은 실행하지 않습니다.
+
+병목 계산 기준:
+
+- `APPROVAL_REQUIRED` 거래가 가장 크면 `APPROVAL_REVIEWER`
+- `SETTLEMENT_READY` 거래가 가장 크면 `SETTLEMENT_OPERATOR`
+- reconciliation warning이 있으면 `RECONCILIATION_ANALYST`
+- callback failure가 있으면 `CALLBACK_OPERATOR`
+
 ## 지원 이벤트
 
 ### Nexus Direct Event

@@ -27,9 +27,9 @@ MVP에서는 배정 주체로 다음 값을 허용한다.
 
 | role | unit capacity |
 | --- | ---: |
-| `SETTLEMENT_OPERATOR` | 120 |
+| `SETTLEMENT_OPERATOR` | 50 |
 | `RECONCILIATION_ANALYST` | 300 |
-| `APPROVAL_REVIEWER` | 40 |
+| `APPROVAL_REVIEWER` | 30 |
 | `LEDGER_OPERATOR` | 100 |
 | other synthetic roles | 80 |
 

@@ -289,19 +289,36 @@ public class LedgerService {
         int backlog = transactionsBacklog + settlementBacklog + reconciliationBacklog + approvalBacklog + callbackBacklog;
         int processed = Math.max(0, totalDemand - backlog);
         BigDecimal productivity = totalDemand == 0
-                ? BigDecimal.ONE.setScale(4, RoundingMode.HALF_UP)
+                ? BigDecimal.ZERO.setScale(4, RoundingMode.HALF_UP)
                 : BigDecimal.valueOf(processed).divide(BigDecimal.valueOf(totalDemand), 4, RoundingMode.HALF_UP);
-        String bottleneckRole = bottleneckRole(transactionsBacklog, settlementBacklog, reconciliationBacklog, approvalBacklog, callbackBacklog);
-        String status = backlog > 0 ? "BOTTLENECK_DETECTED" : "HEALTHY";
+        String bottleneckRole = summaryBottleneckRole(settlementBacklog, reconciliationBacklog, approvalBacklog, callbackBacklog);
+        String status = "HEALTHY";
+        List<WorkforceRoleSummary> roles = workforceRoleSummaries(workDate, assignmentSource, demand);
+        int effectiveCapacity = roles.stream().mapToInt(WorkforceRoleSummary::effectiveCapacity).sum();
+        int usedCapacity = roles.isEmpty() ? 0 : Math.min(processed, effectiveCapacity);
+        int remainingCapacity = Math.max(0, effectiveCapacity - usedCapacity);
+        BigDecimal utilization = effectiveCapacity == 0
+                ? BigDecimal.ZERO.setScale(4, RoundingMode.HALF_UP)
+                : BigDecimal.valueOf(usedCapacity).divide(BigDecimal.valueOf(effectiveCapacity), 4, RoundingMode.HALF_UP);
+        Instant latestEventAt = latestRuntimeSourceEventAt();
+        int reconciliationWarnings = count("select count(*) from reconciliation_result where status in ('WARNING','CRITICAL') or mismatch_count > 0");
+        int callbackFailed = count("select count(*) from audit_log where action='ARCHIVEOS_APPROVAL_DEGRADED'");
         return new WorkforceSummary(
                 "Archive-Ledger",
                 assignmentSource,
+                true,
                 capacity.activeAllocations() > 0,
                 capacity.activeAllocations(),
                 capacity.assignedUnits(),
+                capacity.assignedUnits(),
+                roles,
                 capacity.operatingCost(),
                 LEDGER_BASELINE_DAILY_CAPACITY,
                 capacity.allocatedCapacity(),
+                effectiveCapacity,
+                usedCapacity,
+                remainingCapacity,
+                utilization,
                 totalDemand,
                 backlog,
                 transactionsBacklog,
@@ -314,7 +331,13 @@ public class LedgerService {
                 capacity.operatingCost(),
                 status,
                 capacity.capacityFor("APPROVAL_REVIEWER"),
-                capacity.capacityFor("SETTLEMENT_OPERATOR")
+                capacity.capacityFor("SETTLEMENT_OPERATOR"),
+                latestEventAt,
+                count("select count(*) from finance_transaction"),
+                count("select count(*) from approval_request where status in ('APPROVED','REJECTED')"),
+                count("select count(*) from finance_transaction where status='SETTLED'"),
+                reconciliationWarnings,
+                callbackFailed
         );
     }
 
@@ -328,6 +351,58 @@ public class LedgerService {
         int callbackDemand = count("select count(*) from approval_request where status='REQUESTED' and cast(requested_at as date)=?", day);
         int callbackFailures = count("select count(*) from audit_log where action='ARCHIVEOS_APPROVAL_DEGRADED' and cast(created_at as date)=?", day);
         return new WorkdayDemand(transactionsReceived, settlementReady, approvalRequired, reconciliationIssues, callbackDemand, callbackFailures);
+    }
+
+    private List<WorkforceRoleSummary> workforceRoleSummaries(LocalDate workDate, String sourceService, WorkdayDemand demand) {
+        return jdbc.query("""
+                select role_type, allocated_headcount, capacity_per_person_per_day, productivity_score, wage_per_day, effective_capacity
+                from ledger_workforce_allocation
+                where work_date=? and source_service=? and target_service=? and status='ACTIVE'
+                order by role_type
+                """, (rs, row) -> {
+            String role = rs.getString("role_type");
+            int effective = rs.getInt("effective_capacity");
+            int used = Math.min(roleDemand(role, demand), effective);
+            return new WorkforceRoleSummary(
+                    role,
+                    rs.getInt("allocated_headcount"),
+                    rs.getInt("capacity_per_person_per_day"),
+                    rs.getBigDecimal("productivity_score"),
+                    rs.getBigDecimal("wage_per_day"),
+                    effective,
+                    used,
+                    Math.max(0, effective - used)
+            );
+        }, Date.valueOf(workDate), sourceService, TARGET_LEDGER);
+    }
+
+    private int roleDemand(String role, WorkdayDemand demand) {
+        return switch (role == null ? "" : role.toUpperCase(Locale.ROOT)) {
+            case "TRANSACTION_PROCESSOR", "LEDGER_ACCOUNTANT" -> demand.transactionsReceived();
+            case "SETTLEMENT_OPERATOR" -> demand.settlementReady();
+            case "RECONCILIATION_ANALYST" -> demand.reconciliationIssues();
+            case "APPROVAL_REVIEWER" -> demand.approvalRequired();
+            case "CALLBACK_OPERATOR" -> demand.callbackDemand();
+            case "LEDGER_MANAGER" -> demand.total();
+            default -> 0;
+        };
+    }
+
+    private Instant latestRuntimeSourceEventAt() {
+        Instant receivedAt = jdbc.query("select max(received_at) from received_event",
+                rs -> rs.next() ? instant(rs.getTimestamp(1)) : null);
+        Instant transactionAt = jdbc.query("select max(created_at) from finance_transaction",
+                rs -> rs.next() ? instant(rs.getTimestamp(1)) : null);
+        Instant auditAt = jdbc.query("select max(created_at) from audit_log",
+                rs -> rs.next() ? instant(rs.getTimestamp(1)) : null);
+        Instant latest = receivedAt;
+        if (transactionAt != null && (latest == null || transactionAt.isAfter(latest))) {
+            latest = transactionAt;
+        }
+        if (auditAt != null && (latest == null || auditAt.isAfter(latest))) {
+            latest = auditAt;
+        }
+        return latest;
     }
 
     private WorkforceCapacity workforceCapacity(LocalDate workDate, String sourceService) {
@@ -352,7 +427,7 @@ public class LedgerService {
         }
         if (active == 0) {
             for (String role : List.of("TRANSACTION_PROCESSOR", "LEDGER_ACCOUNTANT", "SETTLEMENT_OPERATOR", "RECONCILIATION_ANALYST", "APPROVAL_REVIEWER", "CALLBACK_OPERATOR", "LEDGER_MANAGER")) {
-                roleCapacity.put(role, LEDGER_BASELINE_DAILY_CAPACITY);
+                roleCapacity.put(role, defaultRoleCapacity(role));
             }
         }
         int allocatedCapacity = active == 0
@@ -371,9 +446,9 @@ public class LedgerService {
         return switch (role == null ? "" : role.toUpperCase(Locale.ROOT)) {
             case "TRANSACTION_PROCESSOR" -> 100;
             case "LEDGER_ACCOUNTANT" -> 100;
-            case "SETTLEMENT_OPERATOR" -> 120;
+            case "SETTLEMENT_OPERATOR" -> 50;
             case "RECONCILIATION_ANALYST" -> 20;
-            case "APPROVAL_REVIEWER" -> 40;
+            case "APPROVAL_REVIEWER" -> 30;
             case "CALLBACK_OPERATOR" -> 50;
             case "LEDGER_MANAGER" -> 200;
             default -> 80;
@@ -419,6 +494,20 @@ public class LedgerService {
                 .max(Map.Entry.comparingByValue())
                 .map(Map.Entry::getKey)
                 .orElse(null);
+    }
+
+    private String summaryBottleneckRole(int settlementBacklog, int reconciliationBacklog,
+                                         int approvalBacklog, int callbackBacklog) {
+        Map<String, Integer> values = new HashMap<>();
+        values.put("APPROVAL_REVIEWER", approvalBacklog);
+        values.put("SETTLEMENT_OPERATOR", settlementBacklog);
+        values.put("RECONCILIATION_ANALYST", reconciliationBacklog);
+        values.put("CALLBACK_OPERATOR", callbackBacklog);
+        return values.entrySet().stream()
+                .filter(entry -> entry.getValue() > 0)
+                .max(Map.Entry.comparingByValue())
+                .map(Map.Entry::getKey)
+                .orElse("NONE");
     }
 
     private BigDecimal backlogCost(int transactionsBacklog, int settlementBacklog, int reconciliationBacklog,
