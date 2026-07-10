@@ -27,6 +27,7 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.Comparator;
 import java.util.function.Function;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 @Service
 public class LedgerService {
@@ -35,6 +36,12 @@ public class LedgerService {
     private final ArchiveOsApprovalClient archiveOs;
     private final LedgerMetrics metrics;
     private final BigDecimal approvalThreshold;
+    private final boolean runtimeAutoRunEnabled;
+    private final AtomicBoolean runtimeTickLock = new AtomicBoolean(false);
+    private volatile Instant lastRuntimeWorkAt;
+    private volatile int lastRuntimeEventsProduced;
+    private volatile int lastRuntimeEventsConsumed;
+    private volatile int lastRuntimeBacklogCount;
     private static final String SOURCE_NEXUS = "Archive-Nexus";
     private static final String SOURCE_LOGITICS = "Archive-Logitics";
     private static final String SOURCE_LOGISTICS = "Archive-Logistics";
@@ -50,12 +57,14 @@ public class LedgerService {
                          ObjectMapper mapper,
                          ArchiveOsApprovalClient archiveOs,
                          LedgerMetrics metrics,
-                         @Value("${archive-ledger.policy.approval-threshold-krw:3000000}") BigDecimal approvalThreshold) {
+                         @Value("${archive-ledger.policy.approval-threshold-krw:3000000}") BigDecimal approvalThreshold,
+                         @Value("${archive.runtime.autorun.enabled:true}") boolean runtimeAutoRunEnabled) {
         this.jdbc = jdbc;
         this.mapper = mapper;
         this.archiveOs = archiveOs;
         this.metrics = metrics;
         this.approvalThreshold = approvalThreshold;
+        this.runtimeAutoRunEnabled = runtimeAutoRunEnabled;
     }
 
     @Transactional
@@ -341,6 +350,95 @@ public class LedgerService {
         );
     }
 
+    public RuntimeStatusResponse runtimeStatus() {
+        int backlog = currentRuntimeBacklog();
+        Instant lastEventAt = latestRuntimeSourceEventAt();
+        Instant lastWorkAt = lastRuntimeWorkAt == null ? latestWorkResultAt() : lastRuntimeWorkAt;
+        boolean active = runtimeAutoRunEnabled && (lastWorkAt != null || lastEventAt != null);
+        String schedulerStatus = runtimeAutoRunEnabled ? "RUNNING" : "DISABLED";
+        String pipelineStatus = runtimeAutoRunEnabled ? (backlog > 0 ? "LIVE_WITH_BACKLOG" : "LIVE") : "PAUSED";
+        return new RuntimeStatusResponse(
+                TARGET_LEDGER,
+                active,
+                runtimeAutoRunEnabled,
+                schedulerStatus,
+                lastWorkAt,
+                lastEventAt,
+                lastRuntimeEventsProduced,
+                lastRuntimeEventsConsumed,
+                backlog,
+                pipelineStatus
+        );
+    }
+
+    public RuntimeTickResult autonomousRuntimeTick(int maxEventsPerTick, int maxBacklogPerTick) {
+        String tickId = "LEDGER-RUNTIME-TICK-" + Instant.now().getEpochSecond() / 30;
+        return autonomousRuntimeTick(tickId, maxEventsPerTick, maxBacklogPerTick);
+    }
+
+    @Transactional
+    public RuntimeTickResult autonomousRuntimeTick(String tickId, int maxEventsPerTick, int maxBacklogPerTick) {
+        String resolvedTickId = value(tickId, "LEDGER-RUNTIME-TICK-" + Instant.now().getEpochSecond() / 30);
+        int safeMaxEvents = Math.max(1, Math.min(maxEventsPerTick, 100));
+        int safeMaxBacklog = Math.max(1, Math.min(maxBacklogPerTick, 1000));
+        int backlog = Math.min(currentRuntimeBacklog(), safeMaxBacklog);
+
+        if (!runtimeTickLock.compareAndSet(false, true)) {
+            return updateRuntimeTickState(resolvedTickId, 0, 0, backlog, true);
+        }
+        try {
+            if (exists("select count(*) from ledger_workday_result where workday_id=?", resolvedTickId)
+                    || exists("select count(*) from audit_log where action='RUNTIME_WORK_TICK' and target_id=?", resolvedTickId)) {
+                return updateRuntimeTickState(resolvedTickId, 0, 0, backlog, true);
+            }
+
+            int produced = 0;
+            int consumed = 0;
+            LocalDate today = LocalDate.now();
+
+            if (produced < safeMaxEvents) {
+                runWorkday(today, "ArchiveOS", resolvedTickId);
+                produced++;
+                consumed += Math.min(backlog, safeMaxBacklog);
+            }
+            if (produced < safeMaxEvents) {
+                reconcile(today);
+                produced++;
+            }
+            if (produced < safeMaxEvents && hasSettlementReadyTransactions(today) && count("select count(*) from finance_transaction where status='SETTLEMENT_READY' and cast(occurred_at as date)=?", Date.valueOf(today)) <= safeMaxBacklog) {
+                runDailyBatch(today, "Archive-Ledger-Runtime", "RUNTIME_AUTORUN", true, true);
+                produced++;
+            }
+
+            audit(resolvedTickId, TARGET_LEDGER, "RUNTIME_WORK_TICK", "runtime_work_loop", resolvedTickId,
+                    null, "COMPLETED",
+                    Map.of(
+                            "maxEventsPerTick", safeMaxEvents,
+                            "maxBacklogPerTick", safeMaxBacklog,
+                            "eventsProduced", produced,
+                            "eventsConsumed", consumed,
+                            "backlog", backlog,
+                            "idempotencyKey", "RUNTIME:" + resolvedTickId,
+                            "correlationId", resolvedTickId,
+                            "causationId", "Archive-Ledger",
+                            "hopCount", 0,
+                            "maxHop", 1
+                    ));
+            return updateRuntimeTickState(resolvedTickId, produced, consumed, backlog, false);
+        } finally {
+            runtimeTickLock.set(false);
+        }
+    }
+
+    private RuntimeTickResult updateRuntimeTickState(String tickId, int produced, int consumed, int backlog, boolean duplicate) {
+        Instant now = Instant.now();
+        lastRuntimeWorkAt = duplicate ? lastRuntimeWorkAt : now;
+        lastRuntimeEventsProduced = produced;
+        lastRuntimeEventsConsumed = consumed;
+        lastRuntimeBacklogCount = backlog;
+        return new RuntimeTickResult(tickId, produced, consumed, backlog, duplicate, lastRuntimeWorkAt);
+    }
+
     private WorkdayDemand ledgerWorkdayDemand(LocalDate workDate) {
         Date day = Date.valueOf(workDate);
         int transactionsReceived = count("select count(*) from received_event where cast(received_at as date)=?", day);
@@ -403,6 +501,26 @@ public class LedgerService {
             latest = auditAt;
         }
         return latest;
+    }
+
+    private Instant latestWorkResultAt() {
+        Instant workdayAt = jdbc.query("select max(created_at) from ledger_workday_result",
+                rs -> rs.next() ? instant(rs.getTimestamp(1)) : null);
+        Instant reconciliationAt = jdbc.query("select max(created_at) from reconciliation_result",
+                rs -> rs.next() ? instant(rs.getTimestamp(1)) : null);
+        if (workdayAt == null) {
+            return reconciliationAt;
+        }
+        if (reconciliationAt == null) {
+            return workdayAt;
+        }
+        return workdayAt.isAfter(reconciliationAt) ? workdayAt : reconciliationAt;
+    }
+
+    private int currentRuntimeBacklog() {
+        return count("select count(*) from finance_transaction where status in ('APPROVAL_REQUIRED','SETTLEMENT_READY')")
+                + count("select count(*) from received_event where processing_status='FAILED'")
+                + count("select count(*) from approval_request where status='REQUESTED'");
     }
 
     private WorkforceCapacity workforceCapacity(LocalDate workDate, String sourceService) {
@@ -1528,7 +1646,8 @@ public class LedgerService {
                 settlementReady,
                 settlementCompleted,
                 reconciliationWarnings,
-                callbackFailed
+                callbackFailed,
+                runtimeStatus()
         );
     }
 

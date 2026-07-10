@@ -134,7 +134,8 @@ public final class LedgerModels {
                                     long settlementReady,
                                     long settlementCompleted,
                                     long reconciliationWarnings,
-                                    long callbackFailed) {
+                                    long callbackFailed,
+                                    RuntimeStatusResponse runtime) {
     }
 
     public record RuntimeOutboxSummary(long pending, long published, long failed, long retry) {
@@ -144,6 +145,30 @@ public final class LedgerModels {
     }
 
     public record RuntimeWorkforceSummary(int totalHeadcount, int effectiveCapacity, int usedCapacity, int backlog) {
+    }
+
+    public record RuntimeStatusResponse(
+            String service,
+            boolean runtimeActive,
+            boolean autoRunEnabled,
+            String schedulerStatus,
+            Instant lastWorkAt,
+            Instant lastEventAt,
+            int eventsProducedLastTick,
+            int eventsConsumedLastTick,
+            int backlogCount,
+            String pipelineStatus
+    ) {
+    }
+
+    public record RuntimeTickResult(
+            String tickId,
+            int eventsProduced,
+            int eventsConsumed,
+            int backlogCount,
+            boolean duplicate,
+            Instant lastWorkAt
+    ) {
     }
 
     public record BulkIngestionResponse(int received, int accepted, int duplicate, int failed,

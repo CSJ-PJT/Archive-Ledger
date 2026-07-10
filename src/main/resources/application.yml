@@ -38,6 +38,15 @@ archive-ledger:
   policy:
     approval-threshold-krw: ${ARCHIVE_LEDGER_APPROVAL_THRESHOLD_KRW:3000000}
 
+archive:
+  runtime:
+    autorun:
+      enabled: ${ARCHIVE_RUNTIME_AUTORUN_ENABLED:true}
+    tick-interval: ${ARCHIVE_RUNTIME_TICK_INTERVAL:30s}
+    initial-delay: ${ARCHIVE_RUNTIME_INITIAL_DELAY:10s}
+    max-events-per-tick: ${ARCHIVE_RUNTIME_MAX_EVENTS_PER_TICK:10}
+    max-backlog-per-tick: ${ARCHIVE_RUNTIME_MAX_BACKLOG_PER_TICK:50}
+
 server:
   port: 18080
 

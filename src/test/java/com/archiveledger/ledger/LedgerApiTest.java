@@ -33,7 +33,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
         "spring.datasource.password=",
         "spring.jpa.hibernate.ddl-auto=none",
         "spring.flyway.enabled=true",
-        "archive-ledger.archiveos.enabled=false"
+        "archive-ledger.archiveos.enabled=false",
+        "archive.runtime.autorun.enabled=false"
 })
 @AutoConfigureMockMvc
 class LedgerApiTest {
@@ -45,6 +46,9 @@ class LedgerApiTest {
 
     @Autowired
     JdbcTemplate jdbc;
+
+    @Autowired
+    LedgerService ledger;
 
     private static final AtomicLong SEQ = new AtomicLong(1);
 
@@ -1036,6 +1040,31 @@ class LedgerApiTest {
     }
 
     @Test
+    void autonomousRuntimeTickCreatesLimitedWorkEventAndIsDuplicateSafe() throws Exception {
+        clearTablesForDeterministicReconciliation();
+        insertSyntheticTransactions(LocalDate.now(), "APPROVAL_REQUIRED", 3);
+
+        var first = ledger.autonomousRuntimeTick("LEDGER-RUNTIME-TICK-TEST", 1, 50);
+        assertThat(first.eventsProduced()).isLessThanOrEqualTo(1);
+        assertThat(first.duplicate()).isFalse();
+        assertThat(count("select count(*) from ledger_workday_result where workday_id=?", "LEDGER-RUNTIME-TICK-TEST")).isEqualTo(1);
+
+        long workdayCount = count("select count(*) from ledger_workday_result");
+        var second = ledger.autonomousRuntimeTick("LEDGER-RUNTIME-TICK-TEST", 1, 50);
+        assertThat(second.duplicate()).isTrue();
+        assertThat(second.eventsProduced()).isEqualTo(0);
+        assertThat(count("select count(*) from ledger_workday_result")).isEqualTo(workdayCount);
+
+        mvc.perform(get("/api/runtime/status"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.service").value("Archive-Ledger"))
+                .andExpect(jsonPath("$.lastWorkAt").exists())
+                .andExpect(jsonPath("$.lastEventAt").exists())
+                .andExpect(jsonPath("$.eventsProducedLastTick").value(0))
+                .andExpect(jsonPath("$.pipelineStatus").exists());
+    }
+
+    @Test
     void workforceWorkdayReportsBacklogAndProductivity() throws Exception {
         clearTablesForDeterministicReconciliation();
         LocalDate workDate = LocalDate.of(2031, 1, 3);
@@ -1255,6 +1284,7 @@ class LedgerApiTest {
     }
 
     private void clearTablesForDeterministicReconciliation() {
+        jdbc.execute("delete from ledger_workforce_allocation");
         jdbc.execute("delete from workforce_workday_result");
         jdbc.execute("delete from workforce_allocation");
         jdbc.execute("delete from daily_batch_run");

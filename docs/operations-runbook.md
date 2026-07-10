@@ -6,6 +6,7 @@
 curl.exe http://localhost:18080/process.html
 curl.exe http://localhost:18080/actuator/health
 curl.exe http://localhost:18080/api/operations/summary
+curl.exe http://localhost:18080/api/runtime/status
 curl.exe http://localhost:18080/api/reconciliation/summary
 curl.exe http://localhost:18080/api/workforce/summary
 curl.exe http://localhost:18080/api/productivity/summary
@@ -22,6 +23,26 @@ Check:
 - ArchiveOS Workforce Overview summary APIs return HTTP 200
 
 The browser dashboard at `/process.html` shows these same checks visually and refreshes every 30 seconds.
+
+## Autonomous Runtime Work Loop
+
+Local/demo runtime can run a limited autonomous work tick:
+
+```env
+ARCHIVE_RUNTIME_AUTORUN_ENABLED=true
+ARCHIVE_RUNTIME_TICK_INTERVAL=30s
+ARCHIVE_RUNTIME_MAX_EVENTS_PER_TICK=10
+ARCHIVE_RUNTIME_MAX_BACKLOG_PER_TICK=50
+```
+
+Check runtime status:
+
+```powershell
+curl.exe http://localhost:18080/api/runtime/status
+curl.exe "http://localhost:18080/api/runtime-events/recent?limit=20"
+```
+
+The loop updates workday, reconciliation, and runtime audit state. Summary GET APIs remain read-only.
 
 ## Workforce Overview
 

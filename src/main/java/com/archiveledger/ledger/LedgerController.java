@@ -162,6 +162,11 @@ public class LedgerController {
         return ledger.operationsSummary();
     }
 
+    @GetMapping("/runtime/status")
+    RuntimeStatusResponse runtimeStatus() {
+        return ledger.runtimeStatus();
+    }
+
     @GetMapping("/settlement-agency/summary")
     SettlementAgencySummary settlementAgencySummary() {
         return ledger.settlementAgencySummary();

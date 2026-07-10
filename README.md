@@ -387,3 +387,21 @@ curl.exe http://localhost:18080/api/settlement-agency/summary
 - approval required 거래는 정산 제외
 - 외부 연동 장애는 Ledger 런타임 장애로 전파하지 않음
 - workforce 이벤트는 무한 fee loop를 만들지 않도록 summary/audit 중심으로 처리
+## Autonomous Runtime Work Loop
+
+Archive-Ledger는 local/demo runtime에서 제한된 속도의 autonomous work tick을 수행할 수 있습니다.
+
+```text
+GET /api/runtime/status
+```
+
+기본 설정:
+
+```yaml
+archive.runtime.autorun.enabled: true
+archive.runtime.tick-interval: 30s
+archive.runtime.max-events-per-tick: 10
+archive.runtime.max-backlog-per-tick: 50
+```
+
+tick은 workday capacity, reconciliation, 제한된 settlement 진행 상태를 갱신하고 runtime event projection에 반영합니다. Summary GET API는 read-only이며 tick을 실행하지 않습니다.
