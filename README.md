@@ -1,8 +1,8 @@
-# Archive-Ledger
-
 <p align="center">
-  <img src="docs/brand/archive-os-logo.png" width="260" alt="ArchiveOS" />
+  <img src="docs/brand/archive-ledger-lockup.svg" width="900" alt="Archive-Ledger" />
 </p>
+
+# Archive-Ledger
 
 Archive-Ledger is the **financial ledger and settlement backend** in the Archive Platform ecosystem.
 
