@@ -69,6 +69,23 @@ public final class LedgerModels {
     public record LedgerSummary(String scope, BigDecimal totalDebit, BigDecimal totalCredit, long entryCount) {
     }
 
+    public record RuntimeEventView(
+            String eventId,
+            String sourceService,
+            String domain,
+            String eventType,
+            String entityType,
+            String entityId,
+            String correlationId,
+            String causationId,
+            String status,
+            String severity,
+            String displayLabel,
+            Instant occurredAt,
+            Map<String, Object> metadata
+    ) {
+    }
+
     public record SettlementBatchView(String batchId, LocalDate settlementDate, String status,
                                       int totalTransactionCount, BigDecimal totalAmount, Instant startedAt,
                                       Instant completedAt, String failureReason) {
@@ -102,7 +119,24 @@ public final class LedgerModels {
                                     long routeDeviationTransactions, long coldChainRiskTransactions,
                                     long marketRevenueTransactions, long paymentCaptureTransactions,
                                     long refundTransactions, long claimCompensationTransactions,
-                                    WorkforceSummary workforce) {
+                                    WorkforceSummary workforce,
+                                    String serviceName,
+                                    String serviceRole,
+                                    Instant latestEventAt,
+                                    RuntimeOutboxSummary outbox,
+                                    RuntimeEconomySummary economy,
+                                    RuntimeWorkforceSummary runtimeWorkforce,
+                                    String degradedReason,
+                                    boolean liveFlowAvailable) {
+    }
+
+    public record RuntimeOutboxSummary(long pending, long published, long failed, long retry) {
+    }
+
+    public record RuntimeEconomySummary(BigDecimal revenue, BigDecimal cost, BigDecimal profit) {
+    }
+
+    public record RuntimeWorkforceSummary(int totalHeadcount, int effectiveCapacity, int usedCapacity, int backlog) {
     }
 
     public record BulkIngestionResponse(int received, int accepted, int duplicate, int failed,

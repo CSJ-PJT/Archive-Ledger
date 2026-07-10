@@ -965,6 +965,57 @@ public class LedgerService {
         return new LedgerSummary(scope, debit, credit, rows.size());
     }
 
+    public List<RuntimeEventView> recentRuntimeEvents(int limit) {
+        int safeLimit = Math.max(1, Math.min(limit, 500));
+        return jdbc.query("""
+                select re.*, ft.transaction_id, ft.transaction_type, ft.status as transaction_status,
+                       ft.amount, ft.currency, ft.factory_id, ft.vendor_id, ft.route_plan_id, ft.shipment_id,
+                       ft.origin_code, ft.destination_code, ft.risk_score
+                from received_event re
+                left join finance_transaction ft on ft.source_event_id = re.event_id
+                order by re.received_at desc
+                limit ?
+                """, this::runtimeEventRow, safeLimit);
+    }
+
+    public List<RuntimeEventView> runtimeEventsByCorrelation(String correlationId) {
+        if (correlationId == null || correlationId.isBlank()) {
+            return List.of();
+        }
+        return jdbc.query("""
+                select re.*, ft.transaction_id, ft.transaction_type, ft.status as transaction_status,
+                       ft.amount, ft.currency, ft.factory_id, ft.vendor_id, ft.route_plan_id, ft.shipment_id,
+                       ft.origin_code, ft.destination_code, ft.risk_score
+                from received_event re
+                left join finance_transaction ft on ft.source_event_id = re.event_id
+                where re.correlation_id = ?
+                order by re.received_at desc
+                limit 500
+                """, this::runtimeEventRow, correlationId);
+    }
+
+    public List<RuntimeEventView> runtimeEventsByEntity(String entityId) {
+        if (entityId == null || entityId.isBlank()) {
+            return List.of();
+        }
+        return jdbc.query("""
+                select re.*, ft.transaction_id, ft.transaction_type, ft.status as transaction_status,
+                       ft.amount, ft.currency, ft.factory_id, ft.vendor_id, ft.route_plan_id, ft.shipment_id,
+                       ft.origin_code, ft.destination_code, ft.risk_score
+                from received_event re
+                left join finance_transaction ft on ft.source_event_id = re.event_id
+                where re.event_id = ?
+                   or ft.transaction_id = ?
+                   or ft.route_plan_id = ?
+                   or ft.shipment_id = ?
+                   or ft.factory_id = ?
+                   or ft.vendor_id = ?
+                   or re.payload like ?
+                order by re.received_at desc
+                limit 500
+                """, this::runtimeEventRow, entityId, entityId, entityId, entityId, entityId, entityId, "%" + entityId + "%");
+    }
+
     public List<SettlementBatchView> settlements() {
         return jdbc.query("select * from settlement_batch order by started_at desc limit 200", this::settlementRow);
     }
@@ -1044,7 +1095,23 @@ public class LedgerService {
                 SOURCE_MARKET);
         long claimCompensationTransactions = count("select count(*) from finance_transaction where transaction_type='CLAIM_COMPENSATION_EXPENSE' and coalesce(source_service, 'Archive-Unknown')=?",
                 SOURCE_MARKET);
+        Instant latestEventAt = jdbc.query("select max(received_at) from received_event",
+                rs -> rs.next() ? instant(rs.getTimestamp(1)) : null);
         String status = failed > 0 ? "DEGRADED" : "HEALTHY";
+        WorkforceSummary workforce = workforceSummary(LocalDate.now(), "ArchiveOS");
+        SettlementAgencySummary agency = settlementAgencySummary();
+        RuntimeOutboxSummary outbox = new RuntimeOutboxSummary(0, 0, 0, 0);
+        RuntimeEconomySummary economy = new RuntimeEconomySummary(
+                agency.totalRevenue(),
+                agency.totalCost(),
+                agency.netRevenue()
+        );
+        RuntimeWorkforceSummary runtimeWorkforce = new RuntimeWorkforceSummary(
+                workforce.assignedUnits(),
+                workforce.allocatedCapacity(),
+                Math.max(0, workforce.demandCount() - workforce.backlogCount()),
+                workforce.backlogCount()
+        );
         return new OperationsSummary(
                 status,
                 received,
@@ -1068,7 +1135,15 @@ public class LedgerService {
                 paymentCaptureTransactions,
                 refundTransactions,
                 claimCompensationTransactions,
-                workforceSummary(LocalDate.now(), "ArchiveOS")
+                workforce,
+                TARGET_LEDGER,
+                "Synthetic financial ledger, settlement, reconciliation, approval callback, and workforce capacity service",
+                latestEventAt,
+                outbox,
+                economy,
+                runtimeWorkforce,
+                failed > 0 ? "FAILED_EVENTS_PRESENT" : null,
+                true
         );
     }
 
@@ -1437,6 +1512,60 @@ public class LedgerService {
         return jdbc.query("select * from finance_transaction where status=? order by created_at desc", this::transactionRow, status);
     }
 
+    private RuntimeEventView runtimeEventRow(java.sql.ResultSet rs, int row) throws java.sql.SQLException {
+        String sourceService = value(rs.getString("source_service"), rs.getString("source"));
+        String eventType = rs.getString("event_type");
+        String transactionStatus = rs.getString("transaction_status");
+        String processingStatus = rs.getString("processing_status");
+        Map<String, Object> payload = readPayload(rs.getString("payload"));
+        Map<String, Object> metadata = new HashMap<>();
+        putIfPresent(metadata, "transactionId", rs.getString("transaction_id"));
+        putIfPresent(metadata, "transactionType", rs.getString("transaction_type"));
+        putIfPresent(metadata, "amount", rs.getBigDecimal("amount"));
+        putIfPresent(metadata, "currency", rs.getString("currency"));
+        putIfPresent(metadata, "factoryId", rs.getString("factory_id"));
+        putIfPresent(metadata, "vendorId", rs.getString("vendor_id"));
+        putIfPresent(metadata, "routePlanId", rs.getString("route_plan_id"));
+        putIfPresent(metadata, "shipmentId", rs.getString("shipment_id"));
+        putIfPresent(metadata, "originCode", rs.getString("origin_code"));
+        putIfPresent(metadata, "destinationCode", rs.getString("destination_code"));
+        putIfPresent(metadata, "riskScore", rs.getBigDecimal("risk_score"));
+        putIfPresent(metadata, "simulationRunId", rs.getString("simulation_run_id"));
+        putIfPresent(metadata, "settlementCycleId", rs.getString("settlement_cycle_id"));
+        putIfPresent(metadata, "hopCount", rs.getInt("hop_count"));
+        putIfPresent(metadata, "maxHop", rs.getObject("max_hop"));
+        copySyntheticPayload(metadata, payload, "orderId", "paymentId", "returnId", "claimId", "customerType", "priority");
+
+        String entityType = runtimeEntityType(sourceService, payload, rs.getString("route_plan_id"), rs.getString("shipment_id"));
+        String entityId = firstText(
+                text(payload.get("orderId")),
+                text(payload.get("paymentId")),
+                text(payload.get("claimId")),
+                text(payload.get("returnId")),
+                rs.getString("route_plan_id"),
+                rs.getString("shipment_id"),
+                rs.getString("transaction_id"),
+                rs.getString("event_id")
+        );
+        String status = runtimeStatus(processingStatus, transactionStatus);
+        String severity = runtimeSeverity(status, eventType, rs.getBigDecimal("risk_score"));
+        return new RuntimeEventView(
+                rs.getString("event_id"),
+                sourceService,
+                runtimeDomain(sourceService),
+                eventType,
+                entityType,
+                entityId,
+                rs.getString("correlation_id"),
+                rs.getString("causation_id"),
+                status,
+                severity,
+                runtimeDisplayLabel(sourceService, eventType, status),
+                instant(rs.getTimestamp("received_at")),
+                metadata
+        );
+    }
+
     private ReceivedEventView receivedEventRow(java.sql.ResultSet rs, int row) throws java.sql.SQLException {
         return new ReceivedEventView(
                 rs.getString("event_id"),
@@ -1644,6 +1773,124 @@ public class LedgerService {
                 bottleneckRole == null ? "WORKDAY_COMPLETED" : "BOTTLENECK_DETECTED",
                 instant(rs.getTimestamp("created_at"))
         );
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> readPayload(String json) {
+        if (json == null || json.isBlank()) {
+            return Map.of();
+        }
+        try {
+            Object value = mapper.readValue(json, Map.class);
+            if (value instanceof Map<?, ?> map) {
+                Map<String, Object> result = new HashMap<>();
+                map.forEach((key, item) -> result.put(String.valueOf(key), item));
+                return result;
+            }
+            return Map.of();
+        } catch (Exception ignored) {
+            return Map.of();
+        }
+    }
+
+    private void copySyntheticPayload(Map<String, Object> target, Map<String, Object> payload, String... keys) {
+        for (String key : keys) {
+            putIfPresent(target, key, payload.get(key));
+        }
+    }
+
+    private void putIfPresent(Map<String, Object> target, String key, Object value) {
+        if (value != null) {
+            target.put(key, value);
+        }
+    }
+
+    private String runtimeDomain(String sourceService) {
+        if (SOURCE_MARKET.equals(sourceService)) {
+            return "market";
+        }
+        if (isLogisticsSource(sourceService)) {
+            return "logistics";
+        }
+        if (SOURCE_NEXUS.equals(sourceService)) {
+            return "nexus";
+        }
+        if ("ArchiveOS".equals(sourceService)) {
+            return "operations";
+        }
+        return "ledger";
+    }
+
+    private String runtimeEntityType(String sourceService, Map<String, Object> payload, String routePlanId, String shipmentId) {
+        if (payload.containsKey("orderId")) {
+            return "order";
+        }
+        if (payload.containsKey("paymentId")) {
+            return "payment";
+        }
+        if (payload.containsKey("claimId")) {
+            return "claim";
+        }
+        if (payload.containsKey("returnId")) {
+            return "return";
+        }
+        if (routePlanId != null || shipmentId != null || isLogisticsSource(sourceService)) {
+            return "shipment";
+        }
+        if (SOURCE_NEXUS.equals(sourceService)) {
+            return "factory_event";
+        }
+        return "transaction";
+    }
+
+    private String runtimeStatus(String processingStatus, String transactionStatus) {
+        if ("FAILED".equals(processingStatus)) {
+            return "failed";
+        }
+        if ("APPROVAL_REQUIRED".equals(transactionStatus)) {
+            return "approval_required";
+        }
+        if ("REJECTED".equals(transactionStatus)) {
+            return "rejected";
+        }
+        if ("SETTLED".equals(transactionStatus)) {
+            return "settled";
+        }
+        if ("SETTLEMENT_READY".equals(transactionStatus)) {
+            return "waiting";
+        }
+        if ("PROCESSED".equals(processingStatus)) {
+            return "completed";
+        }
+        return "unavailable";
+    }
+
+    private String runtimeSeverity(String status, String eventType, BigDecimal riskScore) {
+        if ("failed".equals(status) || "rejected".equals(status)) {
+            return "critical";
+        }
+        if ("approval_required".equals(status)
+                || "COLD_CHAIN_RISK_COST_CONFIRMED".equals(eventType)
+                || (riskScore != null && riskScore.compareTo(LOGISTICS_LOW_RISK_SCORE) >= 0)) {
+            return "warning";
+        }
+        if ("waiting".equals(status)) {
+            return "info";
+        }
+        return "normal";
+    }
+
+    private String runtimeDisplayLabel(String sourceService, String eventType, String status) {
+        return sourceService + " " + eventType + " -> " + status;
+    }
+
+    private String firstText(String... values) {
+        for (String candidate : values) {
+            if (candidate != null && !candidate.isBlank()) {
+                return candidate;
+            }
+        }
+        return null;
     }
 
     private void audit(String traceId, String actor, String action, String targetType, String targetId, String before, String after, Map<String, Object> detail) {

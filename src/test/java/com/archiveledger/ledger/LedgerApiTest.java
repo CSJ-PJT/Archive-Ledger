@@ -745,6 +745,59 @@ class LedgerApiTest {
     }
 
     @Test
+    void runtimeEventsExposeRecentCorrelationEntityAndOperationsLiveFlowContract() throws Exception {
+        String eventId = logisticsEventId().replace("LG", "MK");
+        String idempotency = logisticsIdempotency().replace("LG", "MK");
+        String orderId = "ORDER-LIVE-" + nextId("ORD");
+        String correlationId = "CORR-LIVE-" + nextId("CORR");
+
+        mvc.perform(post("/api/events/market").contentType(MediaType.APPLICATION_JSON).content(
+                        mapper.writeValueAsString(marketEvent("Archive-Market", eventId, idempotency,
+                                "SALES_REVENUE_CONFIRMED", Map.of(
+                                        "orderId", orderId,
+                                        "amount", 120_000L,
+                                        "currency", "KRW",
+                                        "simulationRunId", "SIM-LIVE",
+                                        "settlementCycleId", "CYCLE-LIVE",
+                                        "correlationId", correlationId,
+                                        "causationId", "CAUSE-LIVE",
+                                        "hopCount", 1,
+                                        "maxHop", 8
+                                )))))
+                .andExpect(status().isOk());
+
+        mvc.perform(get("/api/runtime-events/recent").param("limit", "10"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].eventId").exists())
+                .andExpect(jsonPath("$[0].sourceService").exists())
+                .andExpect(jsonPath("$[0].domain").exists())
+                .andExpect(jsonPath("$[0].eventType").exists())
+                .andExpect(jsonPath("$[0].entityType").exists())
+                .andExpect(jsonPath("$[0].entityId").exists())
+                .andExpect(jsonPath("$[0].status").exists())
+                .andExpect(jsonPath("$[0].severity").exists());
+
+        mvc.perform(get("/api/runtime-events/correlation/{correlationId}", correlationId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].correlationId").value(correlationId))
+                .andExpect(jsonPath("$[0].metadata.simulationRunId").value("SIM-LIVE"));
+
+        mvc.perform(get("/api/runtime-events/entity/{entityId}", orderId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].entityId").value(orderId));
+
+        mvc.perform(get("/api/operations/summary"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.serviceName").value("Archive-Ledger"))
+                .andExpect(jsonPath("$.serviceRole").exists())
+                .andExpect(jsonPath("$.latestEventAt").exists())
+                .andExpect(jsonPath("$.outbox.pending").value(0))
+                .andExpect(jsonPath("$.economy.revenue").exists())
+                .andExpect(jsonPath("$.runtimeWorkforce.effectiveCapacity").exists())
+                .andExpect(jsonPath("$.liveFlowAvailable").value(true));
+    }
+
+    @Test
     void compatibilityDispatchedEventFromArchiveLogiticsMapsToLogisticsCost() throws Exception {
         String eventId = logisticsEventId();
         String idempotency = logisticsIdempotency();

@@ -83,6 +83,21 @@ public class LedgerController {
         return ledger.ledgerSummary(date, factoryId, source);
     }
 
+    @GetMapping("/runtime-events/recent")
+    List<RuntimeEventView> recentRuntimeEvents(@RequestParam(defaultValue = "100") int limit) {
+        return ledger.recentRuntimeEvents(limit);
+    }
+
+    @GetMapping("/runtime-events/correlation/{correlationId}")
+    List<RuntimeEventView> runtimeEventsByCorrelation(@PathVariable String correlationId) {
+        return ledger.runtimeEventsByCorrelation(correlationId);
+    }
+
+    @GetMapping("/runtime-events/entity/{entityId}")
+    List<RuntimeEventView> runtimeEventsByEntity(@PathVariable String entityId) {
+        return ledger.runtimeEventsByEntity(entityId);
+    }
+
     @PostMapping("/settlements/daily/run")
     SettlementBatchView runSettlement(@RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate date) {
         return ledger.runSettlement(date);
