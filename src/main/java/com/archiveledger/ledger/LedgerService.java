@@ -43,6 +43,7 @@ public class LedgerService {
     private static final BigDecimal LOGISTICS_LOW_RISK_SCORE = new BigDecimal("0.85");
     private static final int BULK_RESULT_LIMIT = 50;
     private static final int LEDGER_BASELINE_DAILY_CAPACITY = 500;
+    private static final String TARGET_LEDGER = "Archive-Ledger";
 
     public LedgerService(JdbcTemplate jdbc,
                          ObjectMapper mapper,
@@ -111,8 +112,9 @@ public class LedgerService {
         if (request == null) {
             throw new IllegalArgumentException("Request is required.");
         }
-        if (request.assignedUnits() < 0) {
-            throw new IllegalArgumentException("assignedUnits must be greater than or equal to 0.");
+        int headcount = workforceHeadcount(request);
+        if (headcount < 0) {
+            throw new IllegalArgumentException("allocatedHeadcount must be greater than or equal to 0.");
         }
         String sourceService = workforceSource(request.sourceService());
         if (!SOURCE_MARKET.equals(sourceService) && !"ArchiveOS".equals(sourceService)) {
@@ -129,38 +131,58 @@ public class LedgerService {
         String workdayId = value(request.workdayId(), "LEDGER-WORKDAY-" + workDate.toString().replace("-", ""));
         String allocationId = value(request.allocationId(),
                 "WFA-" + workDate.toString().replace("-", "") + "-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase(Locale.ROOT));
-        BigDecimal unitCost = request.unitCostKrw() == null ? new BigDecimal("120000") : request.unitCostKrw();
-        BigDecimal multiplier = request.productivityMultiplier() == null ? BigDecimal.ONE : request.productivityMultiplier();
+        String role = workforceRole(request);
+        int capacityPerPerson = request.capacityPerPersonPerDay() == null
+                ? defaultRoleCapacity(role)
+                : request.capacityPerPersonPerDay();
+        BigDecimal wage = firstNonNull(request.wagePerDay(), request.unitCostKrw(), defaultRoleWage(role));
+        BigDecimal productivity = firstNonNull(request.productivityScore(), request.productivityMultiplier(), BigDecimal.ONE)
+                .setScale(4, RoundingMode.HALF_UP);
+        int effectiveCapacity = BigDecimal.valueOf(headcount)
+                .multiply(BigDecimal.valueOf(capacityPerPerson))
+                .multiply(productivity)
+                .setScale(0, RoundingMode.HALF_UP)
+                .intValue();
         boolean enabled = request.enabled() == null || request.enabled();
-        String role = request.role().toUpperCase(Locale.ROOT);
+        String allocationStatus = enabled ? value(request.status(), "ACTIVE") : "DISABLED";
+        String targetService = value(request.targetService(), TARGET_LEDGER);
 
         jdbc.update("""
-                insert into workforce_allocation(
-                    allocation_id,workday_id,work_date,source_service,role,assigned_units,unit_cost_krw,
-                    productivity_multiplier,enabled,simulation_run_id,settlement_cycle_id,correlation_id,
-                    causation_id,hop_count,max_hop,created_at
+                insert into ledger_workforce_allocation(
+                    allocation_id,workday_id,work_date,simulation_run_id,settlement_cycle_id,source_service,target_service,role_type,
+                    allocated_headcount,capacity_per_person_per_day,productivity_score,wage_per_day,effective_capacity,
+                    status,created_at,updated_at
                 ) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 allocationId,
                 workdayId,
                 Date.valueOf(workDate),
-                sourceService,
-                role,
-                request.assignedUnits(),
-                unitCost,
-                multiplier,
-                enabled,
                 request.simulationRunId(),
                 request.settlementCycleId(),
-                request.correlationId(),
-                request.causationId(),
-                hopCount,
-                maxHop == Integer.MAX_VALUE ? null : maxHop,
+                sourceService,
+                targetService,
+                role,
+                headcount,
+                capacityPerPerson,
+                productivity,
+                wage,
+                effectiveCapacity,
+                allocationStatus,
+                ts(now),
                 ts(now)
         );
-        audit(allocationId, sourceService, "WORKFORCE_ALLOCATION_ASSIGNED", "workforce_allocation", allocationId,
-                null, enabled ? "ENABLED" : "DISABLED",
-                Map.of("workdayId", workdayId, "role", role, "assignedUnits", request.assignedUnits()));
+        audit(allocationId, sourceService, "WORKFORCE_ALLOCATION_ASSIGNED", "ledger_workforce_allocation", allocationId,
+                null, allocationStatus,
+                Map.of(
+                        "workdayId", workdayId,
+                        "roleType", role,
+                        "allocatedHeadcount", headcount,
+                        "effectiveCapacity", effectiveCapacity,
+                        "correlationId", value(request.correlationId(), ""),
+                        "causationId", value(request.causationId(), ""),
+                        "hopCount", hopCount,
+                        "maxHop", maxHop
+                ));
         return workforceAllocation(allocationId).orElseThrow();
     }
 
@@ -168,59 +190,107 @@ public class LedgerService {
     public WorkforceWorkdayResult runWorkday(LocalDate date, String sourceService, String workdayId) {
         LocalDate workDate = date == null ? LocalDate.now() : date;
         String assignmentSource = workforceSource(sourceService);
-        String resolvedWorkdayId = value(workdayId, "LEDGER-WORKDAY-" + workDate.toString().replace("-", ""));
+        String resolvedWorkdayId = value(workdayId,
+                "LEDGER-WORKDAY-" + workDate.toString().replace("-", "") + "-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase(Locale.ROOT));
         WorkforceCapacity capacity = workforceCapacity(workDate, assignmentSource);
-        int demand = ledgerWorkdayDemand(workDate);
-        int processed = Math.min(demand, capacity.allocatedCapacity());
-        int backlog = Math.max(0, demand - processed);
-        BigDecimal productivity = demand == 0
+        WorkdayDemand demand = ledgerWorkdayDemand(workDate);
+        int transactionCapacity = capacity.capacityFor("TRANSACTION_PROCESSOR");
+        int ledgerCapacity = capacity.capacityFor("LEDGER_ACCOUNTANT");
+        int settlementCapacity = capacity.capacityFor("SETTLEMENT_OPERATOR");
+        int reconciliationCapacity = capacity.capacityFor("RECONCILIATION_ANALYST");
+        int approvalCapacity = capacity.capacityFor("APPROVAL_REVIEWER");
+        int callbackCapacity = capacity.capacityFor("CALLBACK_OPERATOR");
+
+        int transactionsProcessed = Math.min(demand.transactionsReceived(), Math.min(transactionCapacity, ledgerCapacity));
+        int transactionsBacklog = Math.max(0, demand.transactionsReceived() - transactionsProcessed);
+        int settlementCompleted = Math.min(demand.settlementReady(), settlementCapacity);
+        int settlementBacklog = Math.max(0, demand.settlementReady() - settlementCompleted);
+        int reconciliationProcessed = Math.min(demand.reconciliationIssues(), reconciliationCapacity);
+        int reconciliationBacklog = Math.max(0, demand.reconciliationIssues() - reconciliationProcessed);
+        int approvalReviewed = Math.min(demand.approvalRequired(), approvalCapacity);
+        int approvalBacklog = Math.max(0, demand.approvalRequired() - approvalReviewed);
+        int callbackProcessed = Math.min(demand.callbackDemand(), callbackCapacity);
+        int callbackBacklog = Math.max(0, demand.callbackDemand() - callbackProcessed);
+        int callbackFailed = Math.max(0, demand.callbackFailures() + callbackBacklog);
+        int totalDemand = demand.total();
+        int totalProcessed = transactionsProcessed + settlementCompleted + reconciliationProcessed + approvalReviewed + callbackProcessed;
+        int totalBacklog = transactionsBacklog + settlementBacklog + reconciliationBacklog + approvalBacklog + callbackBacklog;
+        BigDecimal productivity = totalDemand == 0
                 ? BigDecimal.ONE.setScale(4, RoundingMode.HALF_UP)
-                : BigDecimal.valueOf(processed)
-                .divide(BigDecimal.valueOf(demand), 4, RoundingMode.HALF_UP);
-        boolean bottleneck = backlog > 0;
+                : BigDecimal.valueOf(totalProcessed)
+                .divide(BigDecimal.valueOf(totalDemand), 4, RoundingMode.HALF_UP);
+        String bottleneckRole = bottleneckRole(transactionsBacklog, settlementBacklog, reconciliationBacklog, approvalBacklog, callbackBacklog);
+        boolean bottleneck = bottleneckRole != null;
         String status = bottleneck ? "BOTTLENECK_DETECTED" : "WORKDAY_COMPLETED";
-        String resultId = "WDR-" + workDate.toString().replace("-", "") + "-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase(Locale.ROOT);
+        BigDecimal backlogCost = backlogCost(transactionsBacklog, settlementBacklog, reconciliationBacklog, approvalBacklog, callbackBacklog);
         Instant now = Instant.now();
 
         jdbc.update("""
-                insert into workforce_workday_result(
-                    result_id,workday_id,work_date,source_service,baseline_capacity,allocated_capacity,
-                    demand_count,processed_count,backlog_count,delayed_count,operating_cost_krw,
-                    productivity_score,bottleneck_detected,status,created_at
-                ) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                insert into ledger_workday_result(
+                    workday_id,work_date,baseline_capacity,allocated_capacity,transactions_received,transactions_processed,transactions_backlog,
+                    settlement_ready_count,settlement_completed_count,settlement_backlog_count,
+                    reconciliation_processed_count,reconciliation_backlog_count,approval_reviewed_count,approval_backlog_count,
+                    callback_processed_count,callback_failed_count,callback_backlog_count,payroll_cost,backlog_cost,
+                    productivity_score,bottleneck_role,created_at
+                ) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
-                resultId,
                 resolvedWorkdayId,
                 Date.valueOf(workDate),
-                assignmentSource,
                 LEDGER_BASELINE_DAILY_CAPACITY,
                 capacity.allocatedCapacity(),
-                demand,
-                processed,
-                backlog,
-                backlog,
+                demand.transactionsReceived(),
+                transactionsProcessed,
+                transactionsBacklog,
+                demand.settlementReady(),
+                settlementCompleted,
+                settlementBacklog,
+                reconciliationProcessed,
+                reconciliationBacklog,
+                approvalReviewed,
+                approvalBacklog,
+                callbackProcessed,
+                callbackFailed,
+                callbackBacklog,
                 capacity.operatingCost(),
+                backlogCost,
                 productivity,
-                bottleneck,
-                status,
+                bottleneckRole,
                 ts(now)
         );
-        audit(resultId, "Archive-Ledger", status, "workforce_workday_result", resultId,
+        audit(resolvedWorkdayId, "Archive-Ledger", status, "ledger_workday_result", resolvedWorkdayId,
                 null, status,
-                Map.of("workdayId", resolvedWorkdayId, "demand", demand, "processed", processed, "backlog", backlog));
-        return workforceWorkdayResult(resultId).orElseThrow();
+                Map.of("workdayId", resolvedWorkdayId, "demand", totalDemand, "processed", totalProcessed, "backlog", totalBacklog));
+        if (transactionsBacklog > 0) audit(resolvedWorkdayId, "Archive-Ledger", "TRANSACTION_BACKLOG_INCREASED", "ledger_workday_result", resolvedWorkdayId, null, status, Map.of("backlog", transactionsBacklog));
+        if (settlementBacklog > 0) audit(resolvedWorkdayId, "Archive-Ledger", "SETTLEMENT_DELAYED", "ledger_workday_result", resolvedWorkdayId, null, status, Map.of("backlog", settlementBacklog));
+        if (reconciliationBacklog > 0) audit(resolvedWorkdayId, "Archive-Ledger", "RECONCILIATION_BACKLOG_INCREASED", "ledger_workday_result", resolvedWorkdayId, null, status, Map.of("backlog", reconciliationBacklog));
+        if (approvalBacklog > 0) audit(resolvedWorkdayId, "Archive-Ledger", "APPROVAL_BACKLOG_INCREASED", "ledger_workday_result", resolvedWorkdayId, null, status, Map.of("backlog", approvalBacklog));
+        if (callbackBacklog > 0) audit(resolvedWorkdayId, "Archive-Ledger", "CALLBACK_RETRY_DELAYED", "ledger_workday_result", resolvedWorkdayId, null, status, Map.of("backlog", callbackBacklog));
+        if (bottleneck) audit(resolvedWorkdayId, "Archive-Ledger", "CAPACITY_SHORTAGE_DETECTED", "ledger_workday_result", resolvedWorkdayId, null, status, Map.of("bottleneckRole", bottleneckRole));
+        if (capacity.operatingCost().compareTo(BigDecimal.ZERO) > 0) audit(resolvedWorkdayId, "Archive-Ledger", "LEDGER_WORKFORCE_PAYROLL_COST_INCURRED", "ledger_workday_result", resolvedWorkdayId, null, status, Map.of("payrollCost", capacity.operatingCost()));
+        if (settlementBacklog > 0) audit(resolvedWorkdayId, "Archive-Ledger", "SETTLEMENT_BACKLOG_COST_INCURRED", "ledger_workday_result", resolvedWorkdayId, null, status, Map.of("cost", settlementBacklogCost(settlementBacklog)));
+        if (reconciliationBacklog > 0) audit(resolvedWorkdayId, "Archive-Ledger", "RECONCILIATION_DELAY_COST_INCURRED", "ledger_workday_result", resolvedWorkdayId, null, status, Map.of("cost", reconciliationDelayCost(reconciliationBacklog)));
+        if (approvalBacklog > 0) audit(resolvedWorkdayId, "Archive-Ledger", "APPROVAL_BACKLOG_COST_INCURRED", "ledger_workday_result", resolvedWorkdayId, null, status, Map.of("cost", approvalBacklogCost(approvalBacklog)));
+        if (callbackBacklog > 0) audit(resolvedWorkdayId, "Archive-Ledger", "CALLBACK_DELAY_COST_INCURRED", "ledger_workday_result", resolvedWorkdayId, null, status, Map.of("cost", callbackDelayCost(callbackBacklog)));
+        return workforceWorkdayResult(resolvedWorkdayId).orElseThrow();
     }
 
     public WorkforceSummary workforceSummary(LocalDate date, String sourceService) {
         LocalDate workDate = date == null ? LocalDate.now() : date;
         String assignmentSource = workforceSource(sourceService);
         WorkforceCapacity capacity = workforceCapacity(workDate, assignmentSource);
-        int demand = ledgerWorkdayDemand(workDate);
-        int backlog = Math.max(0, demand - capacity.allocatedCapacity());
-        BigDecimal productivity = demand == 0
+        WorkdayDemand demand = ledgerWorkdayDemand(workDate);
+        int totalDemand = demand.total();
+        int transactionsBacklog = Math.max(0, demand.transactionsReceived() - Math.min(capacity.capacityFor("TRANSACTION_PROCESSOR"), capacity.capacityFor("LEDGER_ACCOUNTANT")));
+        int settlementBacklog = Math.max(0, demand.settlementReady() - capacity.capacityFor("SETTLEMENT_OPERATOR"));
+        int reconciliationBacklog = Math.max(0, demand.reconciliationIssues() - capacity.capacityFor("RECONCILIATION_ANALYST"));
+        int approvalBacklog = Math.max(0, demand.approvalRequired() - capacity.capacityFor("APPROVAL_REVIEWER"));
+        int callbackBacklog = Math.max(0, demand.callbackDemand() - capacity.capacityFor("CALLBACK_OPERATOR"));
+        int backlog = transactionsBacklog + settlementBacklog + reconciliationBacklog + approvalBacklog + callbackBacklog;
+        int processed = Math.max(0, totalDemand - backlog);
+        BigDecimal productivity = totalDemand == 0
                 ? BigDecimal.ONE.setScale(4, RoundingMode.HALF_UP)
-                : BigDecimal.valueOf(Math.min(demand, capacity.allocatedCapacity()))
-                .divide(BigDecimal.valueOf(demand), 4, RoundingMode.HALF_UP);
+                : BigDecimal.valueOf(processed).divide(BigDecimal.valueOf(totalDemand), 4, RoundingMode.HALF_UP);
+        String bottleneckRole = bottleneckRole(transactionsBacklog, settlementBacklog, reconciliationBacklog, approvalBacklog, callbackBacklog);
         String status = backlog > 0 ? "BOTTLENECK_DETECTED" : "HEALTHY";
         return new WorkforceSummary(
                 "Archive-Ledger",
@@ -231,64 +301,197 @@ public class LedgerService {
                 capacity.operatingCost(),
                 LEDGER_BASELINE_DAILY_CAPACITY,
                 capacity.allocatedCapacity(),
-                demand,
+                totalDemand,
                 backlog,
+                transactionsBacklog,
+                approvalBacklog,
+                settlementBacklog,
+                reconciliationBacklog,
+                callbackBacklog,
                 productivity,
+                bottleneckRole,
+                capacity.operatingCost(),
                 status
         );
     }
 
-    private int ledgerWorkdayDemand(LocalDate workDate) {
+    private WorkdayDemand ledgerWorkdayDemand(LocalDate workDate) {
         Date day = Date.valueOf(workDate);
+        int transactionsReceived = count("select count(*) from received_event where cast(received_at as date)=?", day);
         int settlementReady = count("select count(*) from finance_transaction where status='SETTLEMENT_READY' and cast(occurred_at as date)=?", day);
         int approvalRequired = count("select count(*) from finance_transaction where status='APPROVAL_REQUIRED' and cast(created_at as date)=?", day);
-        int reconciliationEvents = count("select count(*) from received_event where cast(received_at as date)=?", day);
-        return settlementReady + approvalRequired + reconciliationEvents;
+        int mismatch = count("select coalesce((select mismatch_count from reconciliation_result where reconciliation_date=? order by created_at desc limit 1), 0)", day);
+        int reconciliationIssues = Math.max(mismatch, count("select count(*) from received_event where processing_status='FAILED' and cast(received_at as date)=?", day));
+        int callbackDemand = count("select count(*) from approval_request where status='REQUESTED' and cast(requested_at as date)=?", day);
+        int callbackFailures = count("select count(*) from audit_log where action='ARCHIVEOS_APPROVAL_DEGRADED' and cast(created_at as date)=?", day);
+        return new WorkdayDemand(transactionsReceived, settlementReady, approvalRequired, reconciliationIssues, callbackDemand, callbackFailures);
     }
 
     private WorkforceCapacity workforceCapacity(LocalDate workDate, String sourceService) {
         List<Map<String, Object>> rows = jdbc.queryForList("""
-                select role, assigned_units, unit_cost_krw, productivity_multiplier
-                from workforce_allocation
-                where work_date=? and source_service=? and enabled=true
+                select role_type, allocated_headcount, wage_per_day, effective_capacity
+                from ledger_workforce_allocation
+                where work_date=? and source_service=? and target_service=? and status='ACTIVE'
                 """,
-                Date.valueOf(workDate), sourceService);
+                Date.valueOf(workDate), sourceService, TARGET_LEDGER);
         int active = rows.size();
         int units = 0;
-        int extraCapacity = 0;
+        Map<String, Integer> roleCapacity = new HashMap<>();
         BigDecimal cost = BigDecimal.ZERO;
         for (Map<String, Object> row : rows) {
-            int assigned = ((Number) row.get("assigned_units")).intValue();
-            BigDecimal unitCost = (BigDecimal) row.get("unit_cost_krw");
-            BigDecimal multiplier = (BigDecimal) row.get("productivity_multiplier");
-            String role = String.valueOf(row.get("role"));
+            int assigned = ((Number) row.get("allocated_headcount")).intValue();
+            BigDecimal wage = (BigDecimal) row.get("wage_per_day");
+            int effective = ((Number) row.get("effective_capacity")).intValue();
+            String role = String.valueOf(row.get("role_type"));
             units += assigned;
-            cost = cost.add(unitCost.multiply(BigDecimal.valueOf(assigned)));
-            BigDecimal roleCapacity = BigDecimal.valueOf(roleCapacity(role))
-                    .multiply(BigDecimal.valueOf(assigned))
-                    .multiply(multiplier);
-            extraCapacity += roleCapacity.setScale(0, RoundingMode.HALF_UP).intValue();
+            cost = cost.add(wage.multiply(BigDecimal.valueOf(assigned)));
+            roleCapacity.merge(role, effective, Integer::sum);
         }
+        if (active == 0) {
+            for (String role : List.of("TRANSACTION_PROCESSOR", "LEDGER_ACCOUNTANT", "SETTLEMENT_OPERATOR", "RECONCILIATION_ANALYST", "APPROVAL_REVIEWER", "CALLBACK_OPERATOR", "LEDGER_MANAGER")) {
+                roleCapacity.put(role, LEDGER_BASELINE_DAILY_CAPACITY);
+            }
+        }
+        int allocatedCapacity = active == 0
+                ? LEDGER_BASELINE_DAILY_CAPACITY
+                : LEDGER_BASELINE_DAILY_CAPACITY + roleCapacity.values().stream().mapToInt(Integer::intValue).sum();
         return new WorkforceCapacity(
                 active,
                 units,
-                LEDGER_BASELINE_DAILY_CAPACITY + extraCapacity,
+                allocatedCapacity,
+                roleCapacity,
                 cost.setScale(2, RoundingMode.HALF_UP)
         );
     }
 
-    private int roleCapacity(String role) {
+    private int defaultRoleCapacity(String role) {
         return switch (role == null ? "" : role.toUpperCase(Locale.ROOT)) {
+            case "TRANSACTION_PROCESSOR" -> 100;
+            case "LEDGER_ACCOUNTANT" -> 100;
             case "SETTLEMENT_OPERATOR" -> 120;
-            case "RECONCILIATION_ANALYST" -> 300;
+            case "RECONCILIATION_ANALYST" -> 20;
             case "APPROVAL_REVIEWER" -> 40;
-            case "LEDGER_OPERATOR" -> 100;
+            case "CALLBACK_OPERATOR" -> 50;
+            case "LEDGER_MANAGER" -> 200;
             default -> 80;
         };
     }
 
     private String workforceSource(String sourceService) {
         return value(sourceService, "ArchiveOS");
+    }
+
+    private int workforceHeadcount(WorkforceAllocationRequest request) {
+        return request.allocatedHeadcount() == null ? request.assignedUnits() : request.allocatedHeadcount();
+    }
+
+    private String workforceRole(WorkforceAllocationRequest request) {
+        String role = value(request.roleType(), request.role());
+        return role.toUpperCase(Locale.ROOT);
+    }
+
+    private BigDecimal defaultRoleWage(String role) {
+        return switch (role == null ? "" : role.toUpperCase(Locale.ROOT)) {
+            case "TRANSACTION_PROCESSOR" -> new BigDecimal("110000");
+            case "LEDGER_ACCOUNTANT" -> new BigDecimal("130000");
+            case "SETTLEMENT_OPERATOR" -> new BigDecimal("120000");
+            case "RECONCILIATION_ANALYST" -> new BigDecimal("150000");
+            case "APPROVAL_REVIEWER" -> new BigDecimal("140000");
+            case "CALLBACK_OPERATOR" -> new BigDecimal("100000");
+            case "LEDGER_MANAGER" -> new BigDecimal("180000");
+            default -> new BigDecimal("100000");
+        };
+    }
+
+    private String bottleneckRole(int transactionsBacklog, int settlementBacklog, int reconciliationBacklog,
+                                  int approvalBacklog, int callbackBacklog) {
+        Map<String, Integer> values = new HashMap<>();
+        values.put("TRANSACTION_PROCESSOR", transactionsBacklog);
+        values.put("SETTLEMENT_OPERATOR", settlementBacklog);
+        values.put("RECONCILIATION_ANALYST", reconciliationBacklog);
+        values.put("APPROVAL_REVIEWER", approvalBacklog);
+        values.put("CALLBACK_OPERATOR", callbackBacklog);
+        return values.entrySet().stream()
+                .filter(entry -> entry.getValue() > 0)
+                .max(Map.Entry.comparingByValue())
+                .map(Map.Entry::getKey)
+                .orElse(null);
+    }
+
+    private BigDecimal backlogCost(int transactionsBacklog, int settlementBacklog, int reconciliationBacklog,
+                                   int approvalBacklog, int callbackBacklog) {
+        return BigDecimal.valueOf(transactionsBacklog).multiply(new BigDecimal("300"))
+                .add(settlementBacklogCost(settlementBacklog))
+                .add(reconciliationDelayCost(reconciliationBacklog))
+                .add(approvalBacklogCost(approvalBacklog))
+                .add(callbackDelayCost(callbackBacklog))
+                .setScale(2, RoundingMode.HALF_UP);
+    }
+
+    private BigDecimal settlementBacklogCost(int backlog) {
+        return BigDecimal.valueOf(backlog).multiply(new BigDecimal("1500"));
+    }
+
+    private BigDecimal reconciliationDelayCost(int backlog) {
+        return BigDecimal.valueOf(backlog).multiply(new BigDecimal("2000"));
+    }
+
+    private BigDecimal approvalBacklogCost(int backlog) {
+        return BigDecimal.valueOf(backlog).multiply(new BigDecimal("2500"));
+    }
+
+    private BigDecimal callbackDelayCost(int backlog) {
+        return BigDecimal.valueOf(backlog).multiply(new BigDecimal("1000"));
+    }
+
+    public SettlementAgencySummary settlementAgencySummary() {
+        WorkforceWorkdayResult latest = latestWorkdayResult().orElse(null);
+        int transactionsProcessed = latest == null ? 0 : latest.transactionsProcessed();
+        int settlementCompleted = latest == null ? 0 : latest.settlementCompletedCount();
+        int reconciliationProcessed = latest == null ? 0 : latest.reconciliationProcessedCount();
+        int approvalReviewed = latest == null ? 0 : latest.approvalReviewedCount();
+        int transactionsBacklog = latest == null ? 0 : latest.transactionsBacklog();
+        int settlementBacklog = latest == null ? 0 : latest.settlementBacklog();
+        int reconciliationBacklog = latest == null ? 0 : latest.reconciliationBacklog();
+        int approvalBacklog = latest == null ? 0 : latest.approvalBacklog();
+        int callbackBacklog = latest == null ? 0 : latest.callbackBacklog();
+        BigDecimal transactionRevenue = BigDecimal.valueOf(transactionsProcessed).multiply(new BigDecimal("120"));
+        BigDecimal settlementRevenue = BigDecimal.valueOf(settlementCompleted).multiply(new BigDecimal("700"));
+        BigDecimal reconciliationRevenue = BigDecimal.valueOf(reconciliationProcessed).multiply(new BigDecimal("500"));
+        BigDecimal approvalRevenue = BigDecimal.valueOf(approvalReviewed).multiply(new BigDecimal("900"));
+        BigDecimal totalRevenue = transactionRevenue.add(settlementRevenue).add(reconciliationRevenue).add(approvalRevenue);
+        BigDecimal payroll = latest == null ? BigDecimal.ZERO : latest.payrollCost();
+        BigDecimal settlementCost = settlementBacklogCost(settlementBacklog);
+        BigDecimal reconciliationCost = reconciliationDelayCost(reconciliationBacklog);
+        BigDecimal approvalCost = approvalBacklogCost(approvalBacklog);
+        BigDecimal callbackCost = callbackDelayCost(callbackBacklog);
+        BigDecimal totalCost = payroll.add(settlementCost).add(reconciliationCost).add(approvalCost).add(callbackCost);
+        return new SettlementAgencySummary(
+                TARGET_LEDGER,
+                transactionRevenue,
+                settlementRevenue,
+                reconciliationRevenue,
+                approvalRevenue,
+                totalRevenue,
+                payroll,
+                settlementCost,
+                reconciliationCost,
+                approvalCost,
+                callbackCost,
+                totalCost,
+                totalRevenue.subtract(totalCost),
+                transactionsProcessed,
+                settlementCompleted,
+                reconciliationProcessed,
+                approvalReviewed,
+                transactionsBacklog,
+                settlementBacklog,
+                reconciliationBacklog,
+                approvalBacklog,
+                callbackBacklog,
+                latest == null ? BigDecimal.ONE.setScale(4, RoundingMode.HALF_UP) : latest.productivityScore(),
+                latest == null ? null : latest.bottleneckRole()
+        );
     }
 
     private EventIngestionResponse ingestWithSource(NexusEventRequest request) {
@@ -864,7 +1067,8 @@ public class LedgerService {
                 marketRevenueTransactions,
                 paymentCaptureTransactions,
                 refundTransactions,
-                claimCompensationTransactions
+                claimCompensationTransactions,
+                workforceSummary(LocalDate.now(), "ArchiveOS")
         );
     }
 
@@ -1339,7 +1543,7 @@ public class LedgerService {
 
     private Optional<WorkforceAllocationView> workforceAllocation(String allocationId) {
         List<WorkforceAllocationView> rows = jdbc.query(
-                "select * from workforce_allocation where allocation_id=?",
+                "select * from ledger_workforce_allocation where allocation_id=?",
                 this::workforceAllocationRow,
                 allocationId
         );
@@ -1352,40 +1556,92 @@ public class LedgerService {
                 rs.getString("workday_id"),
                 rs.getDate("work_date").toLocalDate(),
                 rs.getString("source_service"),
-                rs.getString("role"),
-                rs.getInt("assigned_units"),
-                rs.getBigDecimal("unit_cost_krw"),
-                rs.getBigDecimal("productivity_multiplier"),
-                rs.getBoolean("enabled"),
+                rs.getString("target_service"),
+                rs.getString("role_type"),
+                rs.getString("role_type"),
+                rs.getInt("allocated_headcount"),
+                rs.getInt("allocated_headcount"),
+                rs.getInt("capacity_per_person_per_day"),
+                rs.getBigDecimal("wage_per_day"),
+                rs.getBigDecimal("wage_per_day"),
+                rs.getBigDecimal("productivity_score"),
+                rs.getBigDecimal("productivity_score"),
+                rs.getInt("effective_capacity"),
+                0,
+                rs.getInt("effective_capacity"),
+                "ACTIVE".equals(rs.getString("status")),
+                rs.getString("status"),
                 instant(rs.getTimestamp("created_at"))
         );
     }
 
-    private Optional<WorkforceWorkdayResult> workforceWorkdayResult(String resultId) {
+    private Optional<WorkforceWorkdayResult> workforceWorkdayResult(String workdayId) {
         List<WorkforceWorkdayResult> rows = jdbc.query(
-                "select * from workforce_workday_result where result_id=?",
+                "select * from ledger_workday_result where workday_id=?",
                 this::workforceWorkdayResultRow,
-                resultId
+                workdayId
+        );
+        return rows.stream().findFirst();
+    }
+
+    private Optional<WorkforceWorkdayResult> latestWorkdayResult() {
+        List<WorkforceWorkdayResult> rows = jdbc.query(
+                "select * from ledger_workday_result order by created_at desc limit 1",
+                this::workforceWorkdayResultRow
         );
         return rows.stream().findFirst();
     }
 
     private WorkforceWorkdayResult workforceWorkdayResultRow(java.sql.ResultSet rs, int row) throws java.sql.SQLException {
+        int transactionsReceived = rs.getInt("transactions_received");
+        int transactionsProcessed = rs.getInt("transactions_processed");
+        int transactionsBacklog = rs.getInt("transactions_backlog");
+        int settlementReady = rs.getInt("settlement_ready_count");
+        int settlementCompleted = rs.getInt("settlement_completed_count");
+        int settlementBacklog = rs.getInt("settlement_backlog_count");
+        int reconciliationProcessed = rs.getInt("reconciliation_processed_count");
+        int reconciliationBacklog = rs.getInt("reconciliation_backlog_count");
+        int approvalReviewed = rs.getInt("approval_reviewed_count");
+        int approvalBacklog = rs.getInt("approval_backlog_count");
+        int callbackProcessed = rs.getInt("callback_processed_count");
+        int callbackFailed = rs.getInt("callback_failed_count");
+        int callbackBacklog = rs.getInt("callback_backlog_count");
+        int demand = transactionsReceived + settlementReady + reconciliationProcessed + reconciliationBacklog
+                + approvalReviewed + approvalBacklog + callbackProcessed + callbackBacklog;
+        int processed = transactionsProcessed + settlementCompleted + reconciliationProcessed + approvalReviewed + callbackProcessed;
+        int backlog = transactionsBacklog + settlementBacklog + reconciliationBacklog + approvalBacklog + callbackBacklog;
+        String bottleneckRole = rs.getString("bottleneck_role");
         return new WorkforceWorkdayResult(
-                rs.getString("result_id"),
+                rs.getString("workday_id"),
                 rs.getString("workday_id"),
                 rs.getDate("work_date").toLocalDate(),
-                rs.getString("source_service"),
+                TARGET_LEDGER,
                 rs.getInt("baseline_capacity"),
                 rs.getInt("allocated_capacity"),
-                rs.getInt("demand_count"),
-                rs.getInt("processed_count"),
-                rs.getInt("backlog_count"),
-                rs.getInt("delayed_count"),
-                rs.getBigDecimal("operating_cost_krw"),
+                demand,
+                processed,
+                backlog,
+                backlog,
+                transactionsReceived,
+                transactionsProcessed,
+                transactionsBacklog,
+                settlementReady,
+                settlementCompleted,
+                settlementBacklog,
+                reconciliationProcessed,
+                reconciliationBacklog,
+                approvalReviewed,
+                approvalBacklog,
+                callbackProcessed,
+                callbackFailed,
+                callbackBacklog,
+                rs.getBigDecimal("payroll_cost"),
+                rs.getBigDecimal("payroll_cost"),
+                rs.getBigDecimal("backlog_cost"),
                 rs.getBigDecimal("productivity_score"),
-                rs.getBoolean("bottleneck_detected"),
-                rs.getString("status"),
+                bottleneckRole,
+                bottleneckRole != null,
+                bottleneckRole == null ? "WORKDAY_COMPLETED" : "BOTTLENECK_DETECTED",
                 instant(rs.getTimestamp("created_at"))
         );
     }
@@ -1562,7 +1818,24 @@ public class LedgerService {
             int activeAllocations,
             int assignedUnits,
             int allocatedCapacity,
+            Map<String, Integer> roleCapacities,
             BigDecimal operatingCost
     ) {
+        int capacityFor(String role) {
+            return roleCapacities.getOrDefault(role, activeAllocations == 0 ? LEDGER_BASELINE_DAILY_CAPACITY : 0);
+        }
+    }
+
+    private record WorkdayDemand(
+            int transactionsReceived,
+            int settlementReady,
+            int approvalRequired,
+            int reconciliationIssues,
+            int callbackDemand,
+            int callbackFailures
+    ) {
+        int total() {
+            return transactionsReceived + settlementReady + approvalRequired + reconciliationIssues + callbackDemand;
+        }
     }
 }

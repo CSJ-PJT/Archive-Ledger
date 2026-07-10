@@ -147,6 +147,11 @@ public class LedgerController {
         return ledger.operationsSummary();
     }
 
+    @GetMapping("/settlement-agency/summary")
+    SettlementAgencySummary settlementAgencySummary() {
+        return ledger.settlementAgencySummary();
+    }
+
     @GetMapping("/workforce/summary")
     WorkforceSummary workforceSummary(@RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate date,
                                       @RequestParam(required = false) String sourceService) {

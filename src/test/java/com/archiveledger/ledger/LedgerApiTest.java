@@ -913,7 +913,7 @@ class LedgerApiTest {
                                 "workDate", workDate.toString(),
                                 "sourceService", "ArchiveOS",
                                 "role", "SETTLEMENT_OPERATOR",
-                                "assignedUnits", 1,
+                                "assignedUnits", 5,
                                 "unitCostKrw", 120_000,
                                 "productivityMultiplier", 1.0,
                                 "enabled", true
@@ -925,11 +925,77 @@ class LedgerApiTest {
                         .param("sourceService", "ArchiveOS")
                         .param("workdayId", workdayId))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.allocatedCapacity").value(620))
+                .andExpect(jsonPath("$.allocatedCapacity").value(1100))
                 .andExpect(jsonPath("$.demandCount").value(505))
                 .andExpect(jsonPath("$.processedCount").value(505))
                 .andExpect(jsonPath("$.backlogCount").value(0))
                 .andExpect(jsonPath("$.status").value("WORKDAY_COMPLETED"));
+    }
+
+    @Test
+    void ledgerWorkforceCreatesRoleSpecificBacklogsAndSettlementAgencyCost() throws Exception {
+        clearTablesForDeterministicReconciliation();
+        LocalDate workDate = LocalDate.of(2031, 1, 4);
+        for (int i = 0; i < 3; i++) {
+            insertReceivedEvent(workDate, "EVT-WF-RCV-" + i + "-" + nextId("EVT"));
+        }
+        insertSyntheticTransactions(workDate, "SETTLEMENT_READY", 4);
+        insertSyntheticTransactions(workDate, "APPROVAL_REQUIRED", 2);
+        insertApprovalRequests(workDate, 2);
+        insertReconciliationResult(workDate, 2);
+
+        String workdayId = "LEDGER-WORKDAY-20310104";
+        mvc.perform(post("/api/workforce/allocations")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(mapper.writeValueAsString(Map.of(
+                                "workdayId", workdayId,
+                                "workDate", workDate.toString(),
+                                "sourceService", "ArchiveOS",
+                                "roleType", "TRANSACTION_PROCESSOR",
+                                "role", "TRANSACTION_PROCESSOR",
+                                "allocatedHeadcount", 1,
+                                "capacityPerPersonPerDay", 2,
+                                "wagePerDay", 100_000,
+                                "productivityScore", 1.0,
+                                "enabled", true
+                        ))))
+                .andExpect(status().isOk());
+        mvc.perform(post("/api/workforce/allocations")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(mapper.writeValueAsString(Map.of(
+                                "workdayId", workdayId,
+                                "workDate", workDate.toString(),
+                                "sourceService", "ArchiveOS",
+                                "roleType", "LEDGER_ACCOUNTANT",
+                                "role", "LEDGER_ACCOUNTANT",
+                                "allocatedHeadcount", 1,
+                                "capacityPerPersonPerDay", 2,
+                                "wagePerDay", 110_000,
+                                "productivityScore", 1.0,
+                                "enabled", true
+                        ))))
+                .andExpect(status().isOk());
+
+        mvc.perform(post("/api/workforce/workday/run")
+                        .param("date", workDate.toString())
+                        .param("sourceService", "ArchiveOS")
+                        .param("workdayId", workdayId + "-RUN"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.transactionsReceived").value(3))
+                .andExpect(jsonPath("$.transactionsProcessed").value(2))
+                .andExpect(jsonPath("$.transactionsBacklog").value(1))
+                .andExpect(jsonPath("$.settlementBacklog").value(4))
+                .andExpect(jsonPath("$.approvalBacklog").value(2))
+                .andExpect(jsonPath("$.reconciliationBacklog").value(2))
+                .andExpect(jsonPath("$.bottleneckRole").value("SETTLEMENT_OPERATOR"))
+                .andExpect(jsonPath("$.payrollCost").value(210000.00));
+
+        mvc.perform(get("/api/settlement-agency/summary"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.payrollCost").value(210000.00))
+                .andExpect(jsonPath("$.settlementBacklog").value(4))
+                .andExpect(jsonPath("$.approvalBacklog").value(2))
+                .andExpect(jsonPath("$.reconciliationBacklog").value(2));
     }
 
     @Test
@@ -1055,6 +1121,10 @@ class LedgerApiTest {
     }
 
     private void insertSettlementReadyTransactions(LocalDate workDate, int count) {
+        insertSyntheticTransactions(workDate, "SETTLEMENT_READY", count);
+    }
+
+    private void insertSyntheticTransactions(LocalDate workDate, String status, int count) {
         for (int i = 0; i < count; i++) {
             String id = "TX-WF-" + i + "-" + nextId("TX");
             jdbc.update("""
@@ -1073,15 +1143,66 @@ class LedgerApiTest {
                     "SYN-WF",
                     BigDecimal.valueOf(1000),
                     "KRW",
-                    "SETTLEMENT_READY",
-                    false,
-                    null,
+                    status,
+                    "APPROVAL_REQUIRED".equals(status),
+                    "APPROVAL_REQUIRED".equals(status) ? "APR-WF-" + i + "-" + nextId("APR") : null,
                     "synthetic workforce demand",
                     java.sql.Timestamp.valueOf(workDate.atTime(10, 0)),
                     java.sql.Timestamp.valueOf(workDate.atTime(10, 0)),
                     java.sql.Timestamp.valueOf(workDate.atTime(10, 0))
             );
         }
+    }
+
+    private void insertReceivedEvent(LocalDate workDate, String eventId) {
+        jdbc.update("""
+                insert into received_event(event_id,idempotency_key,source,event_type,schema_version,payload,processing_status,received_at,processed_at)
+                values(?,?,?,?,?,?,?,?,?)
+                """,
+                eventId,
+                "IDEMP-" + eventId,
+                "Archive-Nexus",
+                "MATERIAL_CONSUMED",
+                1,
+                "{}",
+                "PROCESSED",
+                java.sql.Timestamp.valueOf(workDate.atTime(9, 0)),
+                java.sql.Timestamp.valueOf(workDate.atTime(9, 1))
+        );
+    }
+
+    private void insertApprovalRequests(LocalDate workDate, int count) {
+        for (int i = 0; i < count; i++) {
+            jdbc.update("""
+                    insert into approval_request(approval_request_id,transaction_id,requested_to,status,amount,reason,policy_evidence,requested_at)
+                    values(?,?,?,?,?,?,?,?)
+                    """,
+                    "APR-WF-REQ-" + i + "-" + nextId("APR"),
+                    "TX-WF-APR-" + i + "-" + nextId("TX"),
+                    "synthetic-finance-operator",
+                    "REQUESTED",
+                    BigDecimal.valueOf(1000),
+                    "synthetic approval workload",
+                    "synthetic evidence",
+                    java.sql.Timestamp.valueOf(workDate.atTime(11, 0))
+            );
+        }
+    }
+
+    private void insertReconciliationResult(LocalDate workDate, int mismatch) {
+        jdbc.update("""
+                insert into reconciliation_result(
+                    reconciliation_date,nexus_event_count,received_event_count,created_transaction_count,
+                    duplicate_event_count,failed_event_count,approval_required_count,settlement_ready_count,
+                    settled_count,mismatch_count,status,created_at,logistics_event_count,direct_event_count,
+                    logistics_transaction_count,direct_transaction_count,market_event_count,market_transaction_count
+                ) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                java.sql.Date.valueOf(workDate),
+                0, 0, 0, 0, 0, 0, 0, 0, mismatch, "WARNING",
+                java.sql.Timestamp.valueOf(workDate.atTime(12, 0)),
+                0, 0, 0, 0, 0, 0
+        );
     }
 
     private int count(String sql, Object... args) {

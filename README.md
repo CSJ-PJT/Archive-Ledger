@@ -50,6 +50,7 @@ This service uses synthetic/demo data only. No real payment, card, account, logi
 | GET | `/api/reconciliation/summary` | Latest reconciliation summary |
 | POST | `/api/approvals/callback` | Approval transition callback |
 | GET | `/api/operations/summary` | Service operations summary |
+| GET | `/api/settlement-agency/summary` | Settlement agency revenue/cost summary with workforce impact |
 | GET | `/api/workforce/summary` | Synthetic workforce capacity/backlog summary |
 | GET | `/api/productivity/summary` | Productivity summary |
 | GET | `/api/capacity/summary` | Capacity summary |
@@ -174,6 +175,10 @@ docker compose config --quiet
 - [Ledger Transaction Mapping](docs/ledger-transaction-mapping.md)
 - [Settlement Agency Model](docs/settlement-agency-model.md)
 - [Operational Workforce](docs/operational-workforce.md)
+- [Ledger Workforce Model](docs/ledger-workforce-model.md)
+- [Ledger Productivity Model](docs/ledger-productivity-model.md)
+- [Workforce Settlement Impact](docs/workforce-settlement-impact.md)
+- [Workforce Event Contract](docs/workforce-event-contract.md)
 - [Settlement Runbook](docs/settlement-runbook.md)
 - [Reconciliation Fix](docs/reconciliation-fix.md)
 - [Operations Runbook](docs/operations-runbook.md)

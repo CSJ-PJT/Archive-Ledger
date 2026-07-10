@@ -103,6 +103,7 @@ Content-Type: application/json
 | GET | `/api/capacity/summary` | Capacity summary |
 | POST | `/api/workforce/allocations` | Assign synthetic workforce for a workday |
 | POST | `/api/workforce/workday/run?date=YYYY-MM-DD` | Calculate daily capacity, processed count, backlog, cost, and productivity |
+| GET | `/api/settlement-agency/summary` | Settlement agency revenue/cost summary with workforce impact |
 
 Supported allocation sources:
 
