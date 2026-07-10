@@ -4,89 +4,111 @@
 
 # Archive-Ledger
 
-Archive-Ledger is the **financial ledger and settlement backend** in the Archive Platform ecosystem.
+Archive-Ledger는 Archive Platform Ecosystem에서 **이벤트 기반 거래 처리, 복식 원장, 정산, 대사, 승인 callback, workforce 기반 처리량 관제**를 담당하는 Spring Boot 금융 백엔드입니다.
 
-- It receives synthetic cost events from **Archive-Nexus** (direct events).
-- It receives logistics cost events from **Archive-Logistics** (native + compatibility events).
-- It receives commerce events from **Archive-Market** and normalizes them to finance transactions.
-- It creates `finance_transaction`, writes balanced `ledger_entry` rows (double-entry), runs settlement batches, performs reconciliation, and handles approval callbacks.
+Archive-Nexus direct 비용 이벤트, Archive-Logistics 물류비 확정 이벤트, Archive-Market 매출/결제/환불/클레임 이벤트를 수신해 `finance_transaction`으로 정규화하고, debit/credit 균형이 맞는 `ledger_entry`를 생성합니다. 이후 정산 배치, 대사, 승인 callback, settlement agency 수익/비용 요약을 제공합니다.
 
-This service uses synthetic/demo data only. No real payment, card, account, logistics, location, customer personal, or banking data is used.
+> 모든 데이터는 Synthetic Data / Demo Data입니다. 실제 카드번호, 계좌번호, 개인정보, 실제 금융 데이터, 실제 배송/위치 데이터는 사용하지 않습니다.
 
 ## 핵심 역할
 
-- Archive-Nexus direct event ingestion
-- Archive-Logistics native event ingestion
-- Archive-Market event ingestion
-- Finance transaction normalization
-- Double-entry ledger entry creation
-- Settlement batch and settlement exclusion control
-- Reconciliation and mismatch detection
-- Approval callback transition support
-- Operational dashboards, actuator, and audit logging
+- Archive-Nexus direct 비용 이벤트 수신
+- Archive-Logistics native/compatibility 물류비 이벤트 수신
+- Archive-Market 매출/결제/환불/클레임 이벤트 수신
+- idempotency key 기반 중복 방지
+- `finance_transaction` 생성
+- debit/credit 복식 원장 `ledger_entry` 생성
+- `SETTLEMENT_READY` 대상 정산 배치
+- `APPROVAL_REQUIRED` 정산 제외 및 승인 callback 처리
+- reconciliation mismatch 계산
+- Operational Workforce 기반 capacity/backlog/productivity 계산
+- settlement agency 수익/비용 요약
 
-## API
+## Archive Platform 내 위치
 
-| Method | Path | Description |
+```text
+Archive-Market
+  -> 매출/결제/환불/클레임 이벤트
+  -> Archive-Ledger
+
+Archive-Nexus
+  -> 제조/품질/정비/비용 이벤트
+  -> Archive-Ledger
+
+Archive-Logistics
+  -> 물류비/긴급배송/지연/우회/콜드체인 비용 이벤트
+  -> Archive-Ledger
+
+Archive-Ledger
+  -> 거래 정규화
+  -> 복식 원장
+  -> 정산
+  -> 대사
+  -> 승인 callback
+  -> workforce capacity / backlog
+  -> ArchiveOS 관제 대상
+```
+
+## 주요 API
+
+| Method | Path | 설명 |
 | --- | --- | --- |
-| POST | `/api/events/nexus` | Ingest one Archive-Nexus direct event |
-| POST | `/api/events/nexus/bulk` | Ingest Nexus bulk events |
-| POST | `/api/events/logistics` | Ingest one Logistics event |
-| POST | `/api/events/logistics/bulk` | Ingest Logistics events (`{source, events}`) |
-| POST | `/api/events/market` | Ingest one Archive-Market event |
-| POST | `/api/events/market/bulk` | Ingest Market events (`{source, events}`) |
-| GET | `/api/events/received` | List received events (`?source=` supported) |
-| GET | `/api/events/received/{eventId}` | Get one received event |
-| GET | `/api/transactions` | List transactions (`?status=`, `?source=` supported) |
-| GET | `/api/transactions/{transactionId}` | Get one transaction |
-| GET | `/api/ledger/entries` | List ledger entries (`?transactionId=` supported) |
-| GET | `/api/ledger/summary` | Debit/credit summary (`?date=`, `?factoryId=`, `?source=` supported) |
-| GET | `/api/settlements` | List settlement batches |
-| GET | `/api/settlements/{batchId}` | Get settlement batch |
-| GET | `/api/settlements/{batchId}/details` | Settlement details |
-| POST | `/api/settlements/daily/run` | Run daily settlement |
-| POST | `/api/reconciliation/daily` | Run daily reconciliation |
-| GET | `/api/reconciliation/daily` | Get daily reconciliation |
-| GET | `/api/reconciliation/summary` | Latest reconciliation summary |
-| POST | `/api/approvals/callback` | Approval transition callback |
-| GET | `/api/operations/summary` | Service operations summary |
-| GET | `/api/settlement-agency/summary` | Settlement agency revenue/cost summary with workforce impact |
-| GET | `/api/workforce/summary` | Synthetic workforce capacity/backlog summary |
-| GET | `/api/productivity/summary` | Productivity summary |
-| GET | `/api/capacity/summary` | Capacity summary |
-| POST | `/api/workforce/allocations` | Assign synthetic workforce for a workday |
-| POST | `/api/workforce/workday/run` | Run synthetic workday capacity calculation |
-| GET | `/actuator/health` | Health check |
-| GET | `/actuator/info` | Build/runtime info |
-| GET | `/actuator/metrics` | Metrics |
+| `POST` | `/api/events/nexus` | Archive-Nexus direct 이벤트 단건 수신 |
+| `POST` | `/api/events/nexus/bulk` | Archive-Nexus direct 이벤트 bulk 수신 |
+| `POST` | `/api/events/logistics` | Archive-Logistics 이벤트 단건 수신 |
+| `POST` | `/api/events/logistics/bulk` | Archive-Logistics 이벤트 bulk 수신 |
+| `POST` | `/api/events/market` | Archive-Market 이벤트 단건 수신 |
+| `POST` | `/api/events/market/bulk` | Archive-Market 이벤트 bulk 수신 |
+| `GET` | `/api/events/received` | 수신 이벤트 조회, `source` 필터 지원 |
+| `GET` | `/api/transactions` | 거래 조회, `status`, `source` 필터 지원 |
+| `GET` | `/api/ledger/entries` | 원장 entry 조회 |
+| `GET` | `/api/ledger/summary` | debit/credit 요약 |
+| `POST` | `/api/settlements/daily/run` | 일 정산 실행 |
+| `GET` | `/api/settlements` | 정산 배치 조회 |
+| `POST` | `/api/reconciliation/daily` | 일 대사 실행 |
+| `GET` | `/api/reconciliation/summary` | 최신 대사 결과 조회 |
+| `POST` | `/api/approvals/callback` | 승인 결과 callback |
+| `GET` | `/api/operations/summary` | 운영 요약 |
+| `GET` | `/api/settlement-agency/summary` | 정산대행 수익/비용 요약 |
+| `POST` | `/api/workforce/allocations` | synthetic workforce 배정 |
+| `GET` | `/api/workforce/summary` | workforce capacity/backlog 요약 |
+| `GET` | `/api/productivity/summary` | 생산성 요약 |
+| `GET` | `/api/capacity/summary` | capacity 요약 |
+| `POST` | `/api/workforce/workday/run` | workday capacity 처리 결과 계산 |
+| `GET` | `/actuator/health` | health check |
+| `GET` | `/actuator/metrics` | metrics |
 
-### Source and compatibility
+## 지원 이벤트
 
-- 운영 문서 및 계약 표기는 `Archive-Logistics`, `Archive-Market`를 사용합니다.
-- 하위/과거 호환을 위해 `Archive-Logitics`는 유지하고 있으며, 로직에서 compatibility 처리됩니다.
+### Nexus Direct Event
 
-## 주요 운영 규칙
+대표 이벤트:
 
-- Idempotency:
-  - `received_event.event_id` unique
-  - `received_event.idempotency_key` unique
-  - `finance_transaction.source_event_id` unique
-- Duplicate safe:
-  - Duplicate event or idempotency returns `DUPLICATE`
-  - No duplicate ledger entries are created
-- Debit/Credit balance:
-  - For each transaction: `sum(debit) == sum(credit)` by `transaction_id`
-- Settlement exclusion:
-  - `SETTLEMENT_READY` only is settlement target
-  - `APPROVAL_REQUIRED`, `REJECTED`, failed, duplicates are excluded
-- Reconciliation mismatch:
-  - `expectedTransactionCount = max(0, received - duplicate)`
-  - `mismatch = max(0, expectedTransactionCount - created - failed)`
-  - status: `OK` / `WARNING`
+- `MAINTENANCE_COMPLETED`
+- `QUALITY_DEFECT_DETECTED`
+- `MATERIAL_CONSUMED`
+- `EMERGENCY_PURCHASE_REQUESTED`
+- `CORPORATE_CARD_USED`
+- `VENDOR_PAYMENT_REQUESTED`
+- `PRODUCTION_COMPLETED`
 
-## Archive-Market 이벤트 요약
+### Logistics Event
 
-Supported event types:
+대표 이벤트:
+
+- `LOGISTICS_COST_CONFIRMED`
+- `URGENT_DELIVERY_COST_CONFIRMED`
+- `DELAY_PENALTY_CONFIRMED`
+- `ROUTE_DEVIATION_COST_CONFIRMED`
+- `COLD_CHAIN_RISK_COST_CONFIRMED`
+- `LOGISTICS_DAILY_SETTLEMENT_FEE_EARNED`
+- `LOGISTICS_DISPATCHED` compatibility event
+
+외부 표기는 `Archive-Logistics`를 사용합니다. 기존 계약 호환성을 위해 `source=Archive-Logitics`도 계속 처리합니다.
+
+### Market Event
+
+대표 이벤트:
 
 - `SALES_REVENUE_CONFIRMED`
 - `PAYMENT_CAPTURED`
@@ -95,44 +117,123 @@ Supported event types:
 - `MARKET_SERVICE_FEE_PAID`
 - `PAYMENT_PROCESSING_FEE_PAID`
 
-Mapping:
+## 거래 및 원장 처리 원칙
 
-- `SALES_REVENUE_CONFIRMED` -> `SALES_REVENUE`
-- `PAYMENT_CAPTURED` -> `PAYMENT_CAPTURE`
-- `REFUND_REQUESTED` -> `SALES_REFUND`
-- `CLAIM_COMPENSATION_CONFIRMED` -> `CLAIM_COMPENSATION_EXPENSE`
-- `MARKET_SERVICE_FEE_PAID` -> `MARKET_SERVICE_FEE`
-- `PAYMENT_PROCESSING_FEE_PAID` -> `PAYMENT_PROCESSING_FEE`
+- `received_event.event_id` unique
+- `received_event.idempotency_key` unique
+- `finance_transaction.source_event_id` unique
+- 중복 이벤트는 `DUPLICATE`로 안전하게 처리
+- 중복 이벤트는 거래와 원장을 다시 만들지 않음
+- 모든 정상 거래는 debit/credit 2개 이상의 원장 entry 생성
+- `transaction_id` 기준 debit 합계와 credit 합계가 같아야 함
 
-금액은 `payload.amount`가 필수이며 0 초과여야 합니다.  
-`APPROVAL_REQUIRED` 조건(고액/리스크/고위험고객/특정 이벤트 규칙)에 해당하면 정산 대상에서 제외됩니다.
+```text
+sum(ledger_entry.debit_amount)
+==
+sum(ledger_entry.credit_amount)
+```
 
-Query:
+## 정산 규칙
 
-- `GET /api/events/received?source=Archive-Market`
-- `GET /api/transactions?source=Archive-Market`
-- `GET /api/ledger/summary?source=Archive-Market`
+정산 대상:
+
+- `SETTLEMENT_READY`
+
+정산 제외:
+
+- `APPROVAL_REQUIRED`
+- `REJECTED`
+- failed event
+- duplicate event
+
+승인 callback:
+
+- `APPROVED` -> `SETTLEMENT_READY`
+- `REJECTED` -> `REJECTED`
+
+## Reconciliation
+
+대사는 이벤트 수신, 중복, 실패, 거래 생성 수를 기준으로 mismatch를 계산합니다.
+
+```text
+expectedTransactionCount = max(0, received - duplicate)
+mismatch = max(0, expectedTransactionCount - created - failed)
+```
+
+결과 상태:
+
+- `OK`
+- `WARNING`
 
 ## Operational Workforce
 
-Archive-Ledger는 정산, 대사, 승인 검토 업무를 synthetic workforce 기반 capacity 모델로 계산한다.
+Archive-Ledger는 정산/대사/승인/callback 업무를 synthetic workforce 기반 capacity 모델로 계산합니다.
 
-- 실제 직원 이름, 급여, 개인정보는 사용하지 않는다.
-- 모든 비용은 synthetic KRW다.
-- workforce allocation이 없으면 baseline capacity `500`으로 동작한다.
-- `ArchiveOS` 또는 `Archive-Market`을 allocation `sourceService`로 허용한다.
-- `hopCount > maxHop`인 allocation은 거부한다.
+지원 role:
 
-주요 API:
+- `TRANSACTION_PROCESSOR`
+- `LEDGER_ACCOUNTANT`
+- `SETTLEMENT_OPERATOR`
+- `RECONCILIATION_ANALYST`
+- `APPROVAL_REVIEWER`
+- `CALLBACK_OPERATOR`
+- `LEDGER_MANAGER`
+
+각 role은 다음 값을 가집니다.
+
+- `allocatedHeadcount`
+- `capacityPerPersonPerDay`
+- `productivityScore`
+- `wagePerDay`
+- `effectiveCapacity`
+- `usedCapacity`
+- `remainingCapacity`
+
+workforce allocation이 없으면 baseline capacity로 동작합니다. 실제 직원 이름, 급여, 개인정보는 사용하지 않으며 모든 비용은 synthetic KRW입니다.
+
+## Settlement Agency Model
+
+Ledger는 정산대행 서비스로 동작합니다. Workforce 처리량과 backlog는 settlement agency 수익/비용 요약에 반영됩니다.
+
+수익 영향:
+
+- 처리 transaction 증가 -> transaction processing fee 증가
+- settlement 완료 증가 -> settlement agency fee 증가
+- reconciliation 처리 증가 -> reconciliation verification fee 증가
+- approval review 처리 증가 -> approval review fee 증가
+
+비용 영향:
+
+- `LEDGER_WORKFORCE_PAYROLL_COST_INCURRED`
+- `SETTLEMENT_BACKLOG_COST_INCURRED`
+- `RECONCILIATION_DELAY_COST_INCURRED`
+- `APPROVAL_BACKLOG_COST_INCURRED`
+- `CALLBACK_DELAY_COST_INCURRED`
+
+workforce 비용 이벤트는 summary/audit로만 남기며, 다시 transaction event로 재수신하지 않아 fee loop를 만들지 않습니다.
+
+## 로컬 실행
+
+### Gradle
 
 ```powershell
-curl.exe "http://localhost:18080/api/workforce/summary?date=2026-07-10&sourceService=ArchiveOS"
-curl.exe -X POST "http://localhost:18080/api/workforce/workday/run?date=2026-07-10&sourceService=ArchiveOS"
+.\gradlew.bat test --no-daemon --console=plain
+.\gradlew.bat bootJar --no-daemon --console=plain
+.\gradlew.bat bootRun
 ```
 
-## 운영 Runbook
+### Docker Compose
 
-### Health
+```powershell
+docker compose up --build -d
+```
+
+기본 포트:
+
+- Application: `18080`
+- PostgreSQL: `56543`
+
+## Smoke Test
 
 ```powershell
 curl.exe http://localhost:18080/actuator/health
@@ -140,29 +241,21 @@ curl.exe http://localhost:18080/api/operations/summary
 curl.exe http://localhost:18080/api/reconciliation/summary
 ```
 
-### Smoke test
+Market 이벤트 수신:
 
 ```powershell
 $payload = '{"source":"Archive-Market","events":[{"eventId":"evt-market-smoke-001","idempotencyKey":"MARKET:SALES_REVENUE_CONFIRMED:ORDER-0001","source":"Archive-Market","eventType":"SALES_REVENUE_CONFIRMED","schemaVersion":1,"occurredAt":"2026-01-15T10:45:00.000Z","payload":{"orderId":"ORDER-0001","amount":120000,"factoryId":"FAC-A","vendorId":"VENDOR-MARKET-01","originCode":"FAC-A","destinationCode":"DC-SEOUL-01","currency":"KRW"}}]}'
 curl.exe -X POST "http://localhost:18080/api/events/market/bulk" -H "Content-Type: application/json" -d $payload
 curl.exe "http://localhost:18080/api/transactions?source=Archive-Market"
 curl.exe "http://localhost:18080/api/ledger/summary?source=Archive-Market"
-curl.exe "http://localhost:18080/api/operations/summary"
-curl.exe http://localhost:18080/api/events/received?source=Archive-Market
 ```
 
-### Approval safe flow
+Workforce 처리:
 
 ```powershell
-curl.exe -X POST "http://localhost:18080/api/approvals/callback" -H "Content-Type: application/json" -d '{"approvalRequestId":"APR-...","transactionId":"TX-...","decision":"APPROVED","decidedBy":"operator","comment":"approved"}'
-```
-
-## 검증 명령
-
-```powershell
-.\gradlew.bat test --no-daemon --console=plain
-.\gradlew.bat bootJar --no-daemon --console=plain
-docker compose config --quiet
+curl.exe "http://localhost:18080/api/workforce/summary?date=2026-07-10&sourceService=ArchiveOS"
+curl.exe -X POST "http://localhost:18080/api/workforce/workday/run?date=2026-07-10&sourceService=ArchiveOS"
+curl.exe http://localhost:18080/api/settlement-agency/summary
 ```
 
 ## 문서
@@ -183,3 +276,13 @@ docker compose config --quiet
 - [Reconciliation Fix](docs/reconciliation-fix.md)
 - [Operations Runbook](docs/operations-runbook.md)
 - [Smoke Test](docs/smoke-test.md)
+
+## 운영 원칙
+
+- 모든 데이터는 synthetic/demo data로 제한
+- 실제 금융/개인정보/계좌/카드/주소 데이터 사용 금지
+- event idempotency 유지
+- debit/credit 균형 유지
+- approval required 거래는 정산 제외
+- 외부 연동 장애는 Ledger 런타임 장애로 전파하지 않음
+- workforce 이벤트는 무한 fee loop를 만들지 않도록 summary/audit 중심으로 처리
