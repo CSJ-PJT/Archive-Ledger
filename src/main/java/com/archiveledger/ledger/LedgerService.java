@@ -42,6 +42,7 @@ public class LedgerService {
     private static final BigDecimal MARKET_APPROVAL_THRESHOLD = new BigDecimal("300000");
     private static final BigDecimal LOGISTICS_LOW_RISK_SCORE = new BigDecimal("0.85");
     private static final int BULK_RESULT_LIMIT = 50;
+    private static final int LEDGER_BASELINE_DAILY_CAPACITY = 500;
 
     public LedgerService(JdbcTemplate jdbc,
                          ObjectMapper mapper,
@@ -103,6 +104,191 @@ public class LedgerService {
         int failed = (int) results.stream().filter(r -> "FAILED".equals(r.status())).count();
         List<EventIngestionResponse> limited = results.size() > BULK_RESULT_LIMIT ? results.subList(0, BULK_RESULT_LIMIT) : results;
         return new BulkIngestionResponse(requests.size(), accepted, duplicate, failed, limited);
+    }
+
+    @Transactional
+    public WorkforceAllocationView assignWorkforce(WorkforceAllocationRequest request) {
+        if (request == null) {
+            throw new IllegalArgumentException("Request is required.");
+        }
+        if (request.assignedUnits() < 0) {
+            throw new IllegalArgumentException("assignedUnits must be greater than or equal to 0.");
+        }
+        String sourceService = workforceSource(request.sourceService());
+        if (!SOURCE_MARKET.equals(sourceService) && !"ArchiveOS".equals(sourceService)) {
+            throw new IllegalArgumentException("sourceService must be Archive-Market or ArchiveOS.");
+        }
+        int hopCount = request.hopCount() == null ? 0 : request.hopCount();
+        int maxHop = request.maxHop() == null ? Integer.MAX_VALUE : request.maxHop();
+        if (hopCount > maxHop) {
+            throw new IllegalArgumentException("hopCount exceeded maxHop.");
+        }
+
+        Instant now = Instant.now();
+        LocalDate workDate = request.workDate() == null ? LocalDate.now() : request.workDate();
+        String workdayId = value(request.workdayId(), "LEDGER-WORKDAY-" + workDate.toString().replace("-", ""));
+        String allocationId = value(request.allocationId(),
+                "WFA-" + workDate.toString().replace("-", "") + "-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase(Locale.ROOT));
+        BigDecimal unitCost = request.unitCostKrw() == null ? new BigDecimal("120000") : request.unitCostKrw();
+        BigDecimal multiplier = request.productivityMultiplier() == null ? BigDecimal.ONE : request.productivityMultiplier();
+        boolean enabled = request.enabled() == null || request.enabled();
+        String role = request.role().toUpperCase(Locale.ROOT);
+
+        jdbc.update("""
+                insert into workforce_allocation(
+                    allocation_id,workday_id,work_date,source_service,role,assigned_units,unit_cost_krw,
+                    productivity_multiplier,enabled,simulation_run_id,settlement_cycle_id,correlation_id,
+                    causation_id,hop_count,max_hop,created_at
+                ) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                allocationId,
+                workdayId,
+                Date.valueOf(workDate),
+                sourceService,
+                role,
+                request.assignedUnits(),
+                unitCost,
+                multiplier,
+                enabled,
+                request.simulationRunId(),
+                request.settlementCycleId(),
+                request.correlationId(),
+                request.causationId(),
+                hopCount,
+                maxHop == Integer.MAX_VALUE ? null : maxHop,
+                ts(now)
+        );
+        audit(allocationId, sourceService, "WORKFORCE_ALLOCATION_ASSIGNED", "workforce_allocation", allocationId,
+                null, enabled ? "ENABLED" : "DISABLED",
+                Map.of("workdayId", workdayId, "role", role, "assignedUnits", request.assignedUnits()));
+        return workforceAllocation(allocationId).orElseThrow();
+    }
+
+    @Transactional
+    public WorkforceWorkdayResult runWorkday(LocalDate date, String sourceService, String workdayId) {
+        LocalDate workDate = date == null ? LocalDate.now() : date;
+        String assignmentSource = workforceSource(sourceService);
+        String resolvedWorkdayId = value(workdayId, "LEDGER-WORKDAY-" + workDate.toString().replace("-", ""));
+        WorkforceCapacity capacity = workforceCapacity(workDate, assignmentSource);
+        int demand = ledgerWorkdayDemand(workDate);
+        int processed = Math.min(demand, capacity.allocatedCapacity());
+        int backlog = Math.max(0, demand - processed);
+        BigDecimal productivity = demand == 0
+                ? BigDecimal.ONE.setScale(4, RoundingMode.HALF_UP)
+                : BigDecimal.valueOf(processed)
+                .divide(BigDecimal.valueOf(demand), 4, RoundingMode.HALF_UP);
+        boolean bottleneck = backlog > 0;
+        String status = bottleneck ? "BOTTLENECK_DETECTED" : "WORKDAY_COMPLETED";
+        String resultId = "WDR-" + workDate.toString().replace("-", "") + "-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase(Locale.ROOT);
+        Instant now = Instant.now();
+
+        jdbc.update("""
+                insert into workforce_workday_result(
+                    result_id,workday_id,work_date,source_service,baseline_capacity,allocated_capacity,
+                    demand_count,processed_count,backlog_count,delayed_count,operating_cost_krw,
+                    productivity_score,bottleneck_detected,status,created_at
+                ) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                resultId,
+                resolvedWorkdayId,
+                Date.valueOf(workDate),
+                assignmentSource,
+                LEDGER_BASELINE_DAILY_CAPACITY,
+                capacity.allocatedCapacity(),
+                demand,
+                processed,
+                backlog,
+                backlog,
+                capacity.operatingCost(),
+                productivity,
+                bottleneck,
+                status,
+                ts(now)
+        );
+        audit(resultId, "Archive-Ledger", status, "workforce_workday_result", resultId,
+                null, status,
+                Map.of("workdayId", resolvedWorkdayId, "demand", demand, "processed", processed, "backlog", backlog));
+        return workforceWorkdayResult(resultId).orElseThrow();
+    }
+
+    public WorkforceSummary workforceSummary(LocalDate date, String sourceService) {
+        LocalDate workDate = date == null ? LocalDate.now() : date;
+        String assignmentSource = workforceSource(sourceService);
+        WorkforceCapacity capacity = workforceCapacity(workDate, assignmentSource);
+        int demand = ledgerWorkdayDemand(workDate);
+        int backlog = Math.max(0, demand - capacity.allocatedCapacity());
+        BigDecimal productivity = demand == 0
+                ? BigDecimal.ONE.setScale(4, RoundingMode.HALF_UP)
+                : BigDecimal.valueOf(Math.min(demand, capacity.allocatedCapacity()))
+                .divide(BigDecimal.valueOf(demand), 4, RoundingMode.HALF_UP);
+        String status = backlog > 0 ? "BOTTLENECK_DETECTED" : "HEALTHY";
+        return new WorkforceSummary(
+                "Archive-Ledger",
+                assignmentSource,
+                capacity.activeAllocations() > 0,
+                capacity.activeAllocations(),
+                capacity.assignedUnits(),
+                capacity.operatingCost(),
+                LEDGER_BASELINE_DAILY_CAPACITY,
+                capacity.allocatedCapacity(),
+                demand,
+                backlog,
+                productivity,
+                status
+        );
+    }
+
+    private int ledgerWorkdayDemand(LocalDate workDate) {
+        Date day = Date.valueOf(workDate);
+        int settlementReady = count("select count(*) from finance_transaction where status='SETTLEMENT_READY' and cast(occurred_at as date)=?", day);
+        int approvalRequired = count("select count(*) from finance_transaction where status='APPROVAL_REQUIRED' and cast(created_at as date)=?", day);
+        int reconciliationEvents = count("select count(*) from received_event where cast(received_at as date)=?", day);
+        return settlementReady + approvalRequired + reconciliationEvents;
+    }
+
+    private WorkforceCapacity workforceCapacity(LocalDate workDate, String sourceService) {
+        List<Map<String, Object>> rows = jdbc.queryForList("""
+                select role, assigned_units, unit_cost_krw, productivity_multiplier
+                from workforce_allocation
+                where work_date=? and source_service=? and enabled=true
+                """,
+                Date.valueOf(workDate), sourceService);
+        int active = rows.size();
+        int units = 0;
+        int extraCapacity = 0;
+        BigDecimal cost = BigDecimal.ZERO;
+        for (Map<String, Object> row : rows) {
+            int assigned = ((Number) row.get("assigned_units")).intValue();
+            BigDecimal unitCost = (BigDecimal) row.get("unit_cost_krw");
+            BigDecimal multiplier = (BigDecimal) row.get("productivity_multiplier");
+            String role = String.valueOf(row.get("role"));
+            units += assigned;
+            cost = cost.add(unitCost.multiply(BigDecimal.valueOf(assigned)));
+            BigDecimal roleCapacity = BigDecimal.valueOf(roleCapacity(role))
+                    .multiply(BigDecimal.valueOf(assigned))
+                    .multiply(multiplier);
+            extraCapacity += roleCapacity.setScale(0, RoundingMode.HALF_UP).intValue();
+        }
+        return new WorkforceCapacity(
+                active,
+                units,
+                LEDGER_BASELINE_DAILY_CAPACITY + extraCapacity,
+                cost.setScale(2, RoundingMode.HALF_UP)
+        );
+    }
+
+    private int roleCapacity(String role) {
+        return switch (role == null ? "" : role.toUpperCase(Locale.ROOT)) {
+            case "SETTLEMENT_OPERATOR" -> 120;
+            case "RECONCILIATION_ANALYST" -> 300;
+            case "APPROVAL_REVIEWER" -> 40;
+            case "LEDGER_OPERATOR" -> 100;
+            default -> 80;
+        };
+    }
+
+    private String workforceSource(String sourceService) {
+        return value(sourceService, "ArchiveOS");
     }
 
     private EventIngestionResponse ingestWithSource(NexusEventRequest request) {
@@ -1151,6 +1337,59 @@ public class LedgerService {
         );
     }
 
+    private Optional<WorkforceAllocationView> workforceAllocation(String allocationId) {
+        List<WorkforceAllocationView> rows = jdbc.query(
+                "select * from workforce_allocation where allocation_id=?",
+                this::workforceAllocationRow,
+                allocationId
+        );
+        return rows.stream().findFirst();
+    }
+
+    private WorkforceAllocationView workforceAllocationRow(java.sql.ResultSet rs, int row) throws java.sql.SQLException {
+        return new WorkforceAllocationView(
+                rs.getString("allocation_id"),
+                rs.getString("workday_id"),
+                rs.getDate("work_date").toLocalDate(),
+                rs.getString("source_service"),
+                rs.getString("role"),
+                rs.getInt("assigned_units"),
+                rs.getBigDecimal("unit_cost_krw"),
+                rs.getBigDecimal("productivity_multiplier"),
+                rs.getBoolean("enabled"),
+                instant(rs.getTimestamp("created_at"))
+        );
+    }
+
+    private Optional<WorkforceWorkdayResult> workforceWorkdayResult(String resultId) {
+        List<WorkforceWorkdayResult> rows = jdbc.query(
+                "select * from workforce_workday_result where result_id=?",
+                this::workforceWorkdayResultRow,
+                resultId
+        );
+        return rows.stream().findFirst();
+    }
+
+    private WorkforceWorkdayResult workforceWorkdayResultRow(java.sql.ResultSet rs, int row) throws java.sql.SQLException {
+        return new WorkforceWorkdayResult(
+                rs.getString("result_id"),
+                rs.getString("workday_id"),
+                rs.getDate("work_date").toLocalDate(),
+                rs.getString("source_service"),
+                rs.getInt("baseline_capacity"),
+                rs.getInt("allocated_capacity"),
+                rs.getInt("demand_count"),
+                rs.getInt("processed_count"),
+                rs.getInt("backlog_count"),
+                rs.getInt("delayed_count"),
+                rs.getBigDecimal("operating_cost_krw"),
+                rs.getBigDecimal("productivity_score"),
+                rs.getBoolean("bottleneck_detected"),
+                rs.getString("status"),
+                instant(rs.getTimestamp("created_at"))
+        );
+    }
+
     private void audit(String traceId, String actor, String action, String targetType, String targetId, String before, String after, Map<String, Object> detail) {
         jdbc.update("""
                 insert into audit_log(trace_id,actor,action,target_type,target_id,before_status,after_status,detail,created_at)
@@ -1317,5 +1556,13 @@ public class LedgerService {
     }
 
     private record Account(String code, String name) {
+    }
+
+    private record WorkforceCapacity(
+            int activeAllocations,
+            int assignedUnits,
+            int allocatedCapacity,
+            BigDecimal operatingCost
+    ) {
     }
 }

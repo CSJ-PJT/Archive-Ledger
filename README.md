@@ -50,6 +50,11 @@ This service uses synthetic/demo data only. No real payment, card, account, logi
 | GET | `/api/reconciliation/summary` | Latest reconciliation summary |
 | POST | `/api/approvals/callback` | Approval transition callback |
 | GET | `/api/operations/summary` | Service operations summary |
+| GET | `/api/workforce/summary` | Synthetic workforce capacity/backlog summary |
+| GET | `/api/productivity/summary` | Productivity summary |
+| GET | `/api/capacity/summary` | Capacity summary |
+| POST | `/api/workforce/allocations` | Assign synthetic workforce for a workday |
+| POST | `/api/workforce/workday/run` | Run synthetic workday capacity calculation |
 | GET | `/actuator/health` | Health check |
 | GET | `/actuator/info` | Build/runtime info |
 | GET | `/actuator/metrics` | Metrics |
@@ -107,6 +112,23 @@ Query:
 - `GET /api/transactions?source=Archive-Market`
 - `GET /api/ledger/summary?source=Archive-Market`
 
+## Operational Workforce
+
+Archive-Ledger는 정산, 대사, 승인 검토 업무를 synthetic workforce 기반 capacity 모델로 계산한다.
+
+- 실제 직원 이름, 급여, 개인정보는 사용하지 않는다.
+- 모든 비용은 synthetic KRW다.
+- workforce allocation이 없으면 baseline capacity `500`으로 동작한다.
+- `ArchiveOS` 또는 `Archive-Market`을 allocation `sourceService`로 허용한다.
+- `hopCount > maxHop`인 allocation은 거부한다.
+
+주요 API:
+
+```powershell
+curl.exe "http://localhost:18080/api/workforce/summary?date=2026-07-10&sourceService=ArchiveOS"
+curl.exe -X POST "http://localhost:18080/api/workforce/workday/run?date=2026-07-10&sourceService=ArchiveOS"
+```
+
 ## 운영 Runbook
 
 ### Health
@@ -151,8 +173,8 @@ docker compose config --quiet
 - [Market Event Contract](docs/market-event-contract.md)
 - [Ledger Transaction Mapping](docs/ledger-transaction-mapping.md)
 - [Settlement Agency Model](docs/settlement-agency-model.md)
+- [Operational Workforce](docs/operational-workforce.md)
 - [Settlement Runbook](docs/settlement-runbook.md)
 - [Reconciliation Fix](docs/reconciliation-fix.md)
 - [Operations Runbook](docs/operations-runbook.md)
 - [Smoke Test](docs/smoke-test.md)
-

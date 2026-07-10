@@ -94,6 +94,23 @@ Content-Type: application/json
 
 `APPROVED` transitions the transaction to `SETTLEMENT_READY`. Other decisions are treated as rejection and transition the transaction to `REJECTED`.
 
+## Operational Workforce
+
+| Method | Path | Description |
+| --- | --- | --- |
+| GET | `/api/workforce/summary` | Synthetic workforce capacity/backlog summary |
+| GET | `/api/productivity/summary` | Productivity summary |
+| GET | `/api/capacity/summary` | Capacity summary |
+| POST | `/api/workforce/allocations` | Assign synthetic workforce for a workday |
+| POST | `/api/workforce/workday/run?date=YYYY-MM-DD` | Calculate daily capacity, processed count, backlog, cost, and productivity |
+
+Supported allocation sources:
+
+- `ArchiveOS`
+- `Archive-Market`
+
+When no allocation is enabled for a workday, Ledger uses baseline capacity.
+
 ## Operations
 
 | Method | Path | Description |

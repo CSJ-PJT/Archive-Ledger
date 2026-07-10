@@ -71,7 +71,27 @@ Archive-Ledger approval_request
 - `settlement_detail`: settlement included transactions
 - `reconciliation_result`: daily event/transaction/settlement consistency result
 - `approval_request`: approval gate state
+- `workforce_allocation`: synthetic workforce assignment by workday, role, and sourceService
+- `workforce_workday_result`: calculated capacity, backlog, productivity, and synthetic operating cost
 - `audit_log`: state transition and operational audit trail
+
+## Operational Workforce
+
+Archive-Ledger models settlement, reconciliation, and approval review as synthetic workforce-driven operations.
+The workforce layer is additive: existing event ingestion, settlement, approval callback, and reconciliation contracts remain unchanged.
+
+Ledger accepts workforce allocation from `ArchiveOS` or `Archive-Market` and calculates:
+
+- baseline capacity
+- allocated capacity
+- daily demand
+- processed count
+- backlog and delayed count
+- synthetic KRW operating cost
+- productivity score
+- bottleneck status
+
+This gives ArchiveOS a control-plane contract for workforce allocation and bottleneck monitoring without introducing real employee, salary, or personal data.
 
 ## Failure Isolation
 

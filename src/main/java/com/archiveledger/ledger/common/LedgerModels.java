@@ -107,4 +107,72 @@ public final class LedgerModels {
     public record BulkIngestionResponse(int received, int accepted, int duplicate, int failed,
                                         List<EventIngestionResponse> results) {
     }
+
+    public record WorkforceAllocationRequest(
+            String allocationId,
+            @NotBlank String workdayId,
+            LocalDate workDate,
+            String sourceService,
+            @NotBlank String role,
+            int assignedUnits,
+            BigDecimal unitCostKrw,
+            BigDecimal productivityMultiplier,
+            Boolean enabled,
+            String simulationRunId,
+            String settlementCycleId,
+            String correlationId,
+            String causationId,
+            Integer hopCount,
+            Integer maxHop
+    ) {
+    }
+
+    public record WorkforceAllocationView(
+            String allocationId,
+            String workdayId,
+            LocalDate workDate,
+            String sourceService,
+            String role,
+            int assignedUnits,
+            BigDecimal unitCostKrw,
+            BigDecimal productivityMultiplier,
+            boolean enabled,
+            Instant createdAt
+    ) {
+    }
+
+    public record WorkforceWorkdayResult(
+            String resultId,
+            String workdayId,
+            LocalDate workDate,
+            String sourceService,
+            int baselineCapacity,
+            int allocatedCapacity,
+            int demandCount,
+            int processedCount,
+            int backlogCount,
+            int delayedCount,
+            BigDecimal operatingCostKrw,
+            BigDecimal productivityScore,
+            boolean bottleneckDetected,
+            String status,
+            Instant createdAt
+    ) {
+    }
+
+    public record WorkforceSummary(
+            String service,
+            String sourceService,
+            boolean workforceEnabled,
+            int activeAllocations,
+            int assignedUnits,
+            BigDecimal dailyOperatingCostKrw,
+            int baselineCapacity,
+            int allocatedCapacity,
+            int demandCount,
+            int backlogCount,
+            BigDecimal productivityScore,
+            String status
+    ) {
+    }
 }

@@ -841,6 +841,98 @@ class LedgerApiTest {
     }
 
     @Test
+    void workforceAllocationIncreasesLedgerCapacityAndCost() throws Exception {
+        LocalDate workDate = LocalDate.of(2031, 1, 2);
+        String workdayId = "LEDGER-WORKDAY-" + nextId("WF");
+
+        mvc.perform(get("/api/workforce/summary")
+                        .param("date", workDate.toString())
+                        .param("sourceService", "ArchiveOS"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.workforceEnabled").value(false))
+                .andExpect(jsonPath("$.baselineCapacity").value(500))
+                .andExpect(jsonPath("$.allocatedCapacity").value(500));
+
+        Map<String, Object> allocation = new LinkedHashMap<>();
+        allocation.put("workdayId", workdayId);
+        allocation.put("workDate", workDate.toString());
+        allocation.put("sourceService", "ArchiveOS");
+        allocation.put("role", "APPROVAL_REVIEWER");
+        allocation.put("assignedUnits", 2);
+        allocation.put("unitCostKrw", 100_000);
+        allocation.put("productivityMultiplier", 1.0);
+        allocation.put("enabled", true);
+        allocation.put("simulationRunId", "SIM-WF");
+        allocation.put("settlementCycleId", "CYCLE-WF");
+        allocation.put("correlationId", "CORR-WF-" + nextId("CORR"));
+        allocation.put("causationId", "CAUSE-WF");
+        allocation.put("hopCount", 1);
+        allocation.put("maxHop", 8);
+
+        mvc.perform(post("/api/workforce/allocations")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(mapper.writeValueAsString(allocation)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.sourceService").value("ArchiveOS"))
+                .andExpect(jsonPath("$.role").value("APPROVAL_REVIEWER"))
+                .andExpect(jsonPath("$.assignedUnits").value(2));
+
+        mvc.perform(get("/api/capacity/summary")
+                        .param("date", workDate.toString())
+                        .param("sourceService", "ArchiveOS"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.workforceEnabled").value(true))
+                .andExpect(jsonPath("$.activeAllocations").value(1))
+                .andExpect(jsonPath("$.assignedUnits").value(2))
+                .andExpect(jsonPath("$.allocatedCapacity").value(580))
+                .andExpect(jsonPath("$.dailyOperatingCostKrw").value(200000.00));
+    }
+
+    @Test
+    void workforceWorkdayReportsBacklogAndProductivity() throws Exception {
+        clearTablesForDeterministicReconciliation();
+        LocalDate workDate = LocalDate.of(2031, 1, 3);
+        insertSettlementReadyTransactions(workDate, 505);
+
+        mvc.perform(post("/api/workforce/workday/run")
+                        .param("date", workDate.toString())
+                        .param("sourceService", "ArchiveOS"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.baselineCapacity").value(500))
+                .andExpect(jsonPath("$.allocatedCapacity").value(500))
+                .andExpect(jsonPath("$.demandCount").value(505))
+                .andExpect(jsonPath("$.processedCount").value(500))
+                .andExpect(jsonPath("$.backlogCount").value(5))
+                .andExpect(jsonPath("$.status").value("BOTTLENECK_DETECTED"));
+
+        String workdayId = "LEDGER-WORKDAY-" + nextId("WF");
+        mvc.perform(post("/api/workforce/allocations")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(mapper.writeValueAsString(Map.of(
+                                "workdayId", workdayId,
+                                "workDate", workDate.toString(),
+                                "sourceService", "ArchiveOS",
+                                "role", "SETTLEMENT_OPERATOR",
+                                "assignedUnits", 1,
+                                "unitCostKrw", 120_000,
+                                "productivityMultiplier", 1.0,
+                                "enabled", true
+                        ))))
+                .andExpect(status().isOk());
+
+        mvc.perform(post("/api/workforce/workday/run")
+                        .param("date", workDate.toString())
+                        .param("sourceService", "ArchiveOS")
+                        .param("workdayId", workdayId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.allocatedCapacity").value(620))
+                .andExpect(jsonPath("$.demandCount").value(505))
+                .andExpect(jsonPath("$.processedCount").value(505))
+                .andExpect(jsonPath("$.backlogCount").value(0))
+                .andExpect(jsonPath("$.status").value("WORKDAY_COMPLETED"));
+    }
+
+    @Test
     void nexusBulkStillWorks() throws Exception {
         List<Map<String, Object>> events = new ArrayList<>();
         for (int i = 0; i < 1000; i++) {
@@ -949,6 +1041,8 @@ class LedgerApiTest {
     }
 
     private void clearTablesForDeterministicReconciliation() {
+        jdbc.execute("delete from workforce_workday_result");
+        jdbc.execute("delete from workforce_allocation");
         jdbc.execute("delete from daily_batch_run");
         jdbc.execute("delete from reconciliation_result");
         jdbc.execute("delete from settlement_detail");
@@ -958,6 +1052,36 @@ class LedgerApiTest {
         jdbc.execute("delete from ledger_entry");
         jdbc.execute("delete from finance_transaction");
         jdbc.execute("delete from received_event");
+    }
+
+    private void insertSettlementReadyTransactions(LocalDate workDate, int count) {
+        for (int i = 0; i < count; i++) {
+            String id = "TX-WF-" + i + "-" + nextId("TX");
+            jdbc.update("""
+                    insert into finance_transaction(
+                        transaction_id,source_event_id,idempotency_key,transaction_type,
+                        factory_id,vendor_id,synthetic_account_id,amount,currency,status,
+                        approval_required,approval_request_id,reason,occurred_at,created_at,updated_at
+                    ) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    id,
+                    "EVT-WF-" + i + "-" + nextId("EVT"),
+                    "IDEMP-WF-" + i + "-" + nextId("IDEMP"),
+                    "WORKFORCE_TEST",
+                    "FAC-WF",
+                    "VENDOR-WF",
+                    "SYN-WF",
+                    BigDecimal.valueOf(1000),
+                    "KRW",
+                    "SETTLEMENT_READY",
+                    false,
+                    null,
+                    "synthetic workforce demand",
+                    java.sql.Timestamp.valueOf(workDate.atTime(10, 0)),
+                    java.sql.Timestamp.valueOf(workDate.atTime(10, 0)),
+                    java.sql.Timestamp.valueOf(workDate.atTime(10, 0))
+            );
+        }
     }
 
     private int count(String sql, Object... args) {

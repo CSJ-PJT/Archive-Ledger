@@ -146,4 +146,34 @@ public class LedgerController {
     OperationsSummary operationsSummary() {
         return ledger.operationsSummary();
     }
+
+    @GetMapping("/workforce/summary")
+    WorkforceSummary workforceSummary(@RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate date,
+                                      @RequestParam(required = false) String sourceService) {
+        return ledger.workforceSummary(date, sourceService);
+    }
+
+    @GetMapping("/productivity/summary")
+    WorkforceSummary productivitySummary(@RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate date,
+                                         @RequestParam(required = false) String sourceService) {
+        return ledger.workforceSummary(date, sourceService);
+    }
+
+    @GetMapping("/capacity/summary")
+    WorkforceSummary capacitySummary(@RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate date,
+                                     @RequestParam(required = false) String sourceService) {
+        return ledger.workforceSummary(date, sourceService);
+    }
+
+    @PostMapping("/workforce/allocations")
+    WorkforceAllocationView assignWorkforce(@Valid @RequestBody WorkforceAllocationRequest request) {
+        return ledger.assignWorkforce(request);
+    }
+
+    @PostMapping("/workforce/workday/run")
+    WorkforceWorkdayResult runWorkday(@RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate date,
+                                      @RequestParam(defaultValue = "ArchiveOS") String sourceService,
+                                      @RequestParam(required = false) String workdayId) {
+        return ledger.runWorkday(date, sourceService, workdayId);
+    }
 }
