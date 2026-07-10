@@ -49,6 +49,39 @@ Archive-Ledger
   -> ArchiveOS 관제 대상
 ```
 
+## Core Flow
+
+```text
+External Synthetic Events
+  -> Ledger Event Receiver
+     -> idempotency / duplicate guard
+     -> hop guard
+     -> source contract normalization
+  -> finance_transaction
+  -> double-entry ledger_entry
+  -> policy decision
+     -> SETTLEMENT_READY
+        -> daily settlement batch
+        -> reconciliation
+     -> APPROVAL_REQUIRED
+        -> approval_request
+        -> ArchiveOS callback
+     -> DUPLICATE / FAILED
+        -> audit_log
+  -> operations summary
+  -> settlement agency summary
+  -> workforce capacity / backlog summary
+```
+
+| Flow | 입력 이벤트 | Ledger 처리 |
+| --- | --- | --- |
+| `NEXUS_DIRECT` | `MAINTENANCE_COMPLETED`, `QUALITY_DEFECT_DETECTED`, `MATERIAL_CONSUMED`, `EMERGENCY_PURCHASE_REQUESTED`, `CORPORATE_CARD_USED`, `VENDOR_PAYMENT_REQUESTED`, `PRODUCTION_COMPLETED` | 제조/품질/정비/구매 비용 이벤트를 금융 거래로 정규화하고 복식 원장을 생성합니다. |
+| `LOGISTICS_NATIVE` | `LOGISTICS_COST_CONFIRMED`, `URGENT_DELIVERY_COST_CONFIRMED`, `DELAY_PENALTY_CONFIRMED`, `ROUTE_DEVIATION_COST_CONFIRMED`, `COLD_CHAIN_RISK_COST_CONFIRMED` | Archive-Logistics 물류비 확정 이벤트를 비용 거래로 반영하고 승인 필요 여부와 정산 제외 규칙을 적용합니다. |
+| `LOGISTICS_COMPAT` | `source=Archive-Logitics`, `eventType=LOGISTICS_DISPATCHED` | 기존 호환 계약을 유지하며 물류비 확정 거래와 동일한 흐름으로 처리합니다. 외부 표기는 Archive-Logistics를 사용합니다. |
+| `MARKET_COMMERCE` | `SALES_REVENUE_CONFIRMED`, `PAYMENT_CAPTURED`, `REFUND_REQUESTED`, `CLAIM_COMPENSATION_CONFIRMED`, `MARKET_SERVICE_FEE_PAID`, `PAYMENT_PROCESSING_FEE_PAID` | 매출, 결제, 환불, 클레임, 수수료 이벤트를 수익/비용 거래로 정규화합니다. |
+| `APPROVAL` | `APPROVAL_REQUIRED`, `/api/approvals/callback` | 승인 필요 거래를 정산에서 제외하고, 승인 callback 이후 `SETTLEMENT_READY` 또는 `REJECTED`로 전이합니다. |
+| `WORKFORCE` | `WORKFORCE_ALLOCATION_ASSIGNED`, `/api/workforce/workday/run` | synthetic workforce capacity에 따라 처리량, backlog, payroll cost, productivity, bottleneck을 계산합니다. |
+
 ## 주요 API
 
 | Method | Path | 설명 |
