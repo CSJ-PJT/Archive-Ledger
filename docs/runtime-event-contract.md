@@ -21,8 +21,8 @@
   "metadata": {
     "transactionId": "TX-20260115-ABCDEF",
     "transactionType": "SALES_REVENUE",
-    "amount": 120000,
-    "currency": "KRW",
+    "amountBucket": "100K_TO_300K",
+    "syntheticKrwRange": "100,000~300,000 KRW",
     "simulationRunId": "SIM-001",
     "settlementCycleId": "CYCLE-001"
   }
@@ -56,7 +56,7 @@
 
 - synthetic `orderId`, `paymentId`, `returnId`, `claimId`
 - synthetic `routePlanId`, `shipmentId`, `factoryId`, `vendorId`
-- `transactionId`, `transactionType`, `amount`, `currency`
+- `transactionId`, `transactionType`, `amountBucket`, `syntheticKrwRange`
 - `simulationRunId`, `settlementCycleId`, `hopCount`, `maxHop`
 
 금지:
@@ -64,4 +64,4 @@
 - 실제 이름, 전화번호, 주소
 - 카드번호, 계좌번호, 결제 토큰
 - secret, token, password, webhook, private key
-
+- 실제 금융 데이터처럼 보이는 raw amount

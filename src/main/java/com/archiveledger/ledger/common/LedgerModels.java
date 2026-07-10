@@ -127,7 +127,14 @@ public final class LedgerModels {
                                     RuntimeEconomySummary economy,
                                     RuntimeWorkforceSummary runtimeWorkforce,
                                     String degradedReason,
-                                    boolean liveFlowAvailable) {
+                                    boolean liveFlowAvailable,
+                                    long transactionsReceived,
+                                    long transactionsProcessed,
+                                    long approvalBacklog,
+                                    long settlementReady,
+                                    long settlementCompleted,
+                                    long reconciliationWarnings,
+                                    long callbackFailed) {
     }
 
     public record RuntimeOutboxSummary(long pending, long published, long failed, long retry) {
@@ -247,7 +254,9 @@ public final class LedgerModels {
             BigDecimal productivityScore,
             String bottleneckRole,
             BigDecimal payrollCost,
-            String status
+            String status,
+            int approvalReviewerCapacity,
+            int settlementOperatorCapacity
     ) {
     }
 

@@ -780,7 +780,10 @@ class LedgerApiTest {
         mvc.perform(get("/api/runtime-events/correlation/{correlationId}", correlationId))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$[0].correlationId").value(correlationId))
-                .andExpect(jsonPath("$[0].metadata.simulationRunId").value("SIM-LIVE"));
+                .andExpect(jsonPath("$[0].metadata.simulationRunId").value("SIM-LIVE"))
+                .andExpect(jsonPath("$[*].eventType", Matchers.hasItems("MARKET_REVENUE_RECEIVED", "TRANSACTION_CREATED", "LEDGER_ENTRY_CREATED", "SETTLEMENT_READY")))
+                .andExpect(jsonPath("$[0].metadata.amount").doesNotExist())
+                .andExpect(jsonPath("$[0].metadata.amountBucket").exists());
 
         mvc.perform(get("/api/runtime-events/entity/{entityId}", orderId))
                 .andExpect(status().isOk())
@@ -794,7 +797,50 @@ class LedgerApiTest {
                 .andExpect(jsonPath("$.outbox.pending").value(0))
                 .andExpect(jsonPath("$.economy.revenue").exists())
                 .andExpect(jsonPath("$.runtimeWorkforce.effectiveCapacity").exists())
+                .andExpect(jsonPath("$.transactionsReceived").value(Matchers.greaterThanOrEqualTo(1)))
+                .andExpect(jsonPath("$.transactionsProcessed").value(Matchers.greaterThanOrEqualTo(1)))
+                .andExpect(jsonPath("$.settlementReady").value(Matchers.greaterThanOrEqualTo(1)))
+                .andExpect(jsonPath("$.callbackFailed").exists())
+                .andExpect(jsonPath("$.workforce.approvalReviewerCapacity").exists())
+                .andExpect(jsonPath("$.workforce.settlementOperatorCapacity").exists())
                 .andExpect(jsonPath("$.liveFlowAvailable").value(true));
+    }
+
+    @Test
+    void runtimeEventsExposeApprovalSettlementReconciliationAndWorkforceProjection() throws Exception {
+        clearTablesForDeterministicReconciliation();
+        LocalDate workDate = LocalDate.now();
+        String eventId = logisticsEventId();
+        String idempotency = logisticsIdempotency();
+        mvc.perform(post("/api/events/logistics").contentType(MediaType.APPLICATION_JSON).content(
+                        mapper.writeValueAsString(logisticsEvent("Archive-Logistics", eventId, idempotency, "COLD_CHAIN_RISK_COST_CONFIRMED", Map.of(
+                                "routePlanId", "ROUTE-" + nextId("LOG"),
+                                "shipmentId", "SHIP-" + nextId("SHIP"),
+                                "factoryId", "FAC-A",
+                                "originCode", "FAC-A",
+                                "destinationCode", "DC-SEOUL-01",
+                                "totalCost", 400_000L,
+                                "riskScore", 0.91,
+                                "correlationId", "CORR-APPROVAL-" + nextId("CORR")
+                        )))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("ACCEPTED"));
+
+        mvc.perform(post("/api/reconciliation/daily").param("date", workDate.toString()))
+                .andExpect(status().isOk());
+        mvc.perform(post("/api/workforce/workday/run")
+                        .param("date", workDate.toString())
+                        .param("sourceService", "ArchiveOS"))
+                .andExpect(status().isOk());
+
+        mvc.perform(get("/api/runtime-events/entity/{entityId}", eventId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[*].eventType", Matchers.hasItems("LOGISTICS_COST_RECEIVED", "TRANSACTION_CREATED", "LEDGER_ENTRY_CREATED", "APPROVAL_REQUIRED")))
+                .andExpect(jsonPath("$[*].displayLabel", Matchers.hasItem("승인 대기 거래 1건")));
+
+        mvc.perform(get("/api/runtime-events/recent").param("limit", "100"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[*].eventType", Matchers.hasItems("RECONCILIATION_OK", "WORKDAY_COMPLETED")));
     }
 
     @Test
