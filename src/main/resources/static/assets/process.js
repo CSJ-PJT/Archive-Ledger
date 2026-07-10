@@ -2,23 +2,38 @@ const sourceLogistics = "Archive-Logitics";
 const sourceNexus = "Archive-Nexus";
 
 const byId = (id) => document.getElementById(id);
-const languages = ["ko", "en", "ja", "zh"];
-const formatNumber = (value) => Number(value ?? 0).toLocaleString("ko-KR");
-const formatMoney = (value) => Number(value ?? 0).toLocaleString("ko-KR");
+const i18n = window.ArchiveLedgerI18n;
 
 function initLanguageSelector() {
   const selector = byId("languageSelector");
-  if (!selector) return;
-  const saved = localStorage.getItem("archive-ledger-language");
-  const language = languages.includes(saved) ? saved : "ko";
-  selector.value = language;
-  document.documentElement.lang = language;
-  document.documentElement.dataset.language = language;
-  selector.addEventListener("change", () => {
-    localStorage.setItem("archive-ledger-language", selector.value);
-    document.documentElement.lang = selector.value;
-    document.documentElement.dataset.language = selector.value;
-  });
+  if (!selector || !i18n) return;
+
+  selector.innerHTML = i18n.supportedLocales
+    .map((locale) => `<option value="${locale}">${i18n.localeNames[locale]}</option>`)
+    .join("");
+  selector.value = i18n.getLocale();
+  selector.addEventListener("change", () => i18n.setLocale(selector.value));
+  i18n.applyTranslations();
+}
+
+function formatNumber(value) {
+  return i18n ? i18n.formatNumber(value) : Number(value ?? 0).toLocaleString("ko-KR");
+}
+
+function formatMoney(value) {
+  return i18n ? i18n.formatMoney(value) : Number(value ?? 0).toLocaleString("ko-KR");
+}
+
+function translate(key, params) {
+  return i18n ? i18n.t(key, params) : key;
+}
+
+function translateStatus(value) {
+  return i18n ? i18n.translateStatus(value) : (value ?? "UNKNOWN");
+}
+
+function formatDateTime(value) {
+  return i18n ? i18n.formatDateTime(value) : new Date(value).toLocaleString("ko-KR");
 }
 
 async function getJson(path) {
@@ -37,11 +52,17 @@ function setText(id, value) {
 function setStatus(id, value) {
   const element = byId(id);
   if (!element) return;
-  element.textContent = value;
+  const rawValue = value ?? "UNKNOWN";
+  element.textContent = translateStatus(rawValue);
+  element.title = rawValue;
   element.classList.remove("balanced", "warning", "danger");
-  if (value === "HEALTHY" || value === "OK" || value === "UP") element.classList.add("balanced");
-  else if (value === "WARNING" || value === "DEGRADED") element.classList.add("warning");
-  else element.classList.add("danger");
+  if (rawValue === "HEALTHY" || rawValue === "OK" || rawValue === "UP" || rawValue === "BALANCED") {
+    element.classList.add("balanced");
+  } else if (rawValue === "WARNING" || rawValue === "DEGRADED" || rawValue === "CHECK") {
+    element.classList.add("warning");
+  } else {
+    element.classList.add("danger");
+  }
 }
 
 function renderBalance(id, summary) {
@@ -50,7 +71,8 @@ function renderBalance(id, summary) {
   const balanced = debit === credit;
   const element = byId(id);
   if (!element) return balanced;
-  element.textContent = `D ${formatMoney(debit)} / C ${formatMoney(credit)} (${summary?.entryCount ?? 0} entries)`;
+  const entryCount = summary?.entryCount ?? 0;
+  element.textContent = `${translate("ledger.debitShort")} ${formatMoney(debit)} / ${translate("ledger.creditShort")} ${formatMoney(credit)} (${formatNumber(entryCount)} ${translate("ledger.entries")})`;
   element.classList.toggle("balanced", balanced);
   element.classList.toggle("danger", !balanced);
   return balanced;
@@ -61,18 +83,21 @@ function renderTransactions(rows) {
   if (!target) return;
   const selected = Array.isArray(rows) ? rows.slice(0, 10) : [];
   if (selected.length === 0) {
-    target.innerHTML = '<tr><td colspan="5">거래가 없습니다.</td></tr>';
+    target.innerHTML = `<tr><td colspan="5">${translate("transactions.empty")}</td></tr>`;
     return;
   }
-  target.innerHTML = selected.map((row) => `
-    <tr>
-      <td><code>${row.transactionId ?? "-"}</code></td>
-      <td>${row.transactionType ?? "-"}</td>
-      <td>${row.status ?? "-"}</td>
-      <td>${formatMoney(row.amount)} ${row.currency ?? ""}</td>
-      <td>${row.approvalRequired ? "required" : "not required"}</td>
-    </tr>
-  `).join("");
+  target.innerHTML = selected.map((row) => {
+    const status = row.status ?? "-";
+    return `
+      <tr>
+        <td><code>${row.transactionId ?? "-"}</code></td>
+        <td>${row.transactionType ?? "-"}</td>
+        <td title="${status}">${translateStatus(status)}</td>
+        <td>${formatMoney(row.amount)} ${row.currency ?? ""}</td>
+        <td>${row.approvalRequired ? translate("approval.required") : translate("approval.notRequired")}</td>
+      </tr>
+    `;
+  }).join("");
 }
 
 async function refreshDashboard() {
@@ -111,12 +136,10 @@ async function refreshDashboard() {
 
   const logisticsBalanced = renderBalance("logisticsDebitCredit", logisticsLedger);
   const nexusBalanced = renderBalance("nexusDebitCredit", nexusLedger);
-  setText("ledgerBalance", logisticsBalanced && nexusBalanced ? "BALANCED" : "CHECK");
-  byId("ledgerBalance")?.classList.toggle("balanced", logisticsBalanced && nexusBalanced);
-  byId("ledgerBalance")?.classList.toggle("danger", !(logisticsBalanced && nexusBalanced));
+  setStatus("ledgerBalance", logisticsBalanced && nexusBalanced ? "BALANCED" : "CHECK");
 
   renderTransactions(transactions);
-  setText("lastUpdated", `Updated ${new Date().toLocaleString("ko-KR")}`);
+  setText("lastUpdated", translate("common.updatedAt", { time: formatDateTime(new Date()) }));
 }
 
 async function guardedRefresh() {
@@ -127,13 +150,18 @@ async function guardedRefresh() {
   } catch (error) {
     setStatus("serviceStatus", "UNAVAILABLE");
     setStatus("reconciliationStatus", "UNKNOWN");
-    setText("lastUpdated", error.message);
+    const lastUpdated = byId("lastUpdated");
+    if (lastUpdated) {
+      lastUpdated.textContent = translate("common.unavailable");
+      lastUpdated.title = error.message;
+    }
   } finally {
     if (button) button.disabled = false;
   }
 }
 
 byId("refreshButton")?.addEventListener("click", guardedRefresh);
+window.addEventListener("archive:locale-changed", guardedRefresh);
 initLanguageSelector();
 guardedRefresh();
 setInterval(guardedRefresh, 30000);
