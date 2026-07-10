@@ -49,6 +49,55 @@ Archive-Ledger
   -> ArchiveOS 관제 대상
 ```
 
+## Ecosystem Flow
+
+```text
+Archive-Market
+  -> customer demand / order / payment / revenue / refund / claim
+  -> Archive-Nexus
+     -> production / inventory / shipment request
+  -> Archive-Ledger
+     -> sales revenue / payment capture / refund / claim settlement
+
+Archive-Nexus
+  -> manufacturing / quality / maintenance / cost events
+  -> Archive-Ledger
+     -> direct cost transaction / ledger entry / settlement
+  -> shipment / logistics trigger
+  -> Archive-Logistics
+
+Archive-Logistics
+  -> route / ETA / logistics cost / delay / deviation / cold-chain risk
+  -> Archive-Ledger
+     -> logistics cost transaction / approval gate / settlement exclusion
+
+Archive-Ledger
+  -> received_event
+  -> finance_transaction
+  -> debit / credit ledger_entry
+  -> approval_request
+  -> settlement_batch
+  -> reconciliation_result
+  -> settlement agency revenue / workforce cost
+  -> ArchiveOS
+
+ArchiveOS
+  -> ecosystem operations summary
+  -> profit / loss / cash balance / burn rate / bankruptcy risk
+  -> approval decision / intervention signal
+  -> Market / Nexus / Logistics / Ledger orchestration
+```
+
+| Service | Ledger로 들어오는 흐름 | Ledger에서 보장하는 것 |
+| --- | --- | --- |
+| Archive-Market | 매출, 결제, 환불, 클레임, 수수료 이벤트 | 수익/비용 거래 정규화, 결제/환불 원장, 정산대행 수익 반영 |
+| Archive-Nexus | 제조, 품질, 정비, 구매, 비용 이벤트 | direct cost 거래 생성, debit/credit 원장 균형, 정산 가능 상태 전이 |
+| Archive-Logistics | 물류비, 긴급배송비, 지연/우회/콜드체인 비용 이벤트 | logistics 비용 거래 생성, 고위험 이벤트 승인 분기, 정산 제외 |
+| ArchiveOS | 승인 callback, 운영 관제, 개입 신호 | 승인 결과 반영, 정산 상태 전이, 운영 summary 제공 |
+| Operational Workforce | synthetic workforce allocation, workday run | 처리 capacity, backlog, payroll cost, productivity, bottleneck 계산 |
+
+모든 cross-service event는 `eventId`, `idempotencyKey`, `correlationId`, `causationId`, `simulationRunId`, `settlementCycleId`, `hopCount`, `maxHop` 기반으로 추적하며, duplicate guard와 hop guard로 무한 순환을 방지합니다.
+
 ## Core Flow
 
 ```text
