@@ -84,8 +84,9 @@ public class LedgerController {
     }
 
     @GetMapping("/runtime-events/recent")
-    List<RuntimeEventView> recentRuntimeEvents(@RequestParam(defaultValue = "100") int limit) {
-        return ledger.recentRuntimeEvents(limit);
+    List<RuntimeEventView> recentRuntimeEvents(@RequestParam(required = false) String after,
+                                               @RequestParam(defaultValue = "100") int limit) {
+        return ledger.recentRuntimeEvents(limit, after);
     }
 
     @GetMapping("/runtime-events/correlation/{correlationId}")

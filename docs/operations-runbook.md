@@ -44,6 +44,14 @@ curl.exe "http://localhost:18080/api/runtime-events/recent?limit=20"
 
 The loop updates workday, reconciliation, and runtime audit state. Summary GET APIs remain read-only.
 
+For incremental ArchiveOS collection, store `latestCursor` from `/api/runtime/status` and pass it to the next request:
+
+```powershell
+curl.exe "http://localhost:18080/api/runtime-events/recent?after={cursor}&limit=100"
+```
+
+An invalid cursor returns an empty array and does not change Ledger state. `WAITING_FOR_DATA` means the service has no runtime projection yet; it is not an automatic failure state.
+
 ## Workforce Overview
 
 ArchiveOS reads these Ledger endpoints as read-only runtime summaries:

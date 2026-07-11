@@ -12,6 +12,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.nio.charset.StandardCharsets;
 import java.sql.Date;
 import java.sql.Timestamp;
 import java.time.Duration;
@@ -19,6 +20,7 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
@@ -37,6 +39,7 @@ public class LedgerService {
     private final LedgerMetrics metrics;
     private final BigDecimal approvalThreshold;
     private final boolean runtimeAutoRunEnabled;
+    private final int callbackRetryLimit;
     private final AtomicBoolean runtimeTickLock = new AtomicBoolean(false);
     private volatile Instant lastRuntimeWorkAt;
     private volatile int lastRuntimeEventsProduced;
@@ -58,13 +61,15 @@ public class LedgerService {
                          ArchiveOsApprovalClient archiveOs,
                          LedgerMetrics metrics,
                          @Value("${archive-ledger.policy.approval-threshold-krw:3000000}") BigDecimal approvalThreshold,
-                         @Value("${archive.runtime.autorun.enabled:true}") boolean runtimeAutoRunEnabled) {
+                         @Value("${archive.runtime.autorun.enabled:true}") boolean runtimeAutoRunEnabled,
+                         @Value("${archive.runtime.callback-retry-limit:3}") int callbackRetryLimit) {
         this.jdbc = jdbc;
         this.mapper = mapper;
         this.archiveOs = archiveOs;
         this.metrics = metrics;
         this.approvalThreshold = approvalThreshold;
         this.runtimeAutoRunEnabled = runtimeAutoRunEnabled;
+        this.callbackRetryLimit = Math.max(0, Math.min(callbackRetryLimit, 10));
     }
 
     @Transactional
@@ -198,6 +203,10 @@ public class LedgerService {
 
     @Transactional
     public WorkforceWorkdayResult runWorkday(LocalDate date, String sourceService, String workdayId) {
+        return runWorkday(date, sourceService, workdayId, Integer.MAX_VALUE);
+    }
+
+    private WorkforceWorkdayResult runWorkday(LocalDate date, String sourceService, String workdayId, int maxItemsPerRole) {
         LocalDate workDate = date == null ? LocalDate.now() : date;
         String assignmentSource = workforceSource(sourceService);
         String resolvedWorkdayId = value(workdayId,
@@ -210,16 +219,17 @@ public class LedgerService {
         int reconciliationCapacity = capacity.capacityFor("RECONCILIATION_ANALYST");
         int approvalCapacity = capacity.capacityFor("APPROVAL_REVIEWER");
         int callbackCapacity = capacity.capacityFor("CALLBACK_OPERATOR");
+        int roleWorkLimit = maxItemsPerRole == Integer.MAX_VALUE ? Integer.MAX_VALUE : Math.max(0, maxItemsPerRole);
 
-        int transactionsProcessed = Math.min(demand.transactionsReceived(), Math.min(transactionCapacity, ledgerCapacity));
+        int transactionsProcessed = Math.min(demand.transactionsReceived(), Math.min(roleWorkLimit, Math.min(transactionCapacity, ledgerCapacity)));
         int transactionsBacklog = Math.max(0, demand.transactionsReceived() - transactionsProcessed);
-        int settlementCompleted = Math.min(demand.settlementReady(), settlementCapacity);
+        int settlementCompleted = Math.min(demand.settlementReady(), Math.min(roleWorkLimit, settlementCapacity));
         int settlementBacklog = Math.max(0, demand.settlementReady() - settlementCompleted);
-        int reconciliationProcessed = Math.min(demand.reconciliationIssues(), reconciliationCapacity);
+        int reconciliationProcessed = Math.min(demand.reconciliationIssues(), Math.min(roleWorkLimit, reconciliationCapacity));
         int reconciliationBacklog = Math.max(0, demand.reconciliationIssues() - reconciliationProcessed);
-        int approvalReviewed = Math.min(demand.approvalRequired(), approvalCapacity);
+        int approvalReviewed = Math.min(demand.approvalRequired(), Math.min(roleWorkLimit, approvalCapacity));
         int approvalBacklog = Math.max(0, demand.approvalRequired() - approvalReviewed);
-        int callbackProcessed = Math.min(demand.callbackDemand(), callbackCapacity);
+        int callbackProcessed = Math.min(demand.callbackDemand(), Math.min(roleWorkLimit, callbackCapacity));
         int callbackBacklog = Math.max(0, demand.callbackDemand() - callbackProcessed);
         int callbackFailed = Math.max(0, demand.callbackFailures() + callbackBacklog);
         int totalDemand = demand.total();
@@ -281,7 +291,9 @@ public class LedgerService {
         if (reconciliationBacklog > 0) audit(resolvedWorkdayId, "Archive-Ledger", "RECONCILIATION_DELAY_COST_INCURRED", "ledger_workday_result", resolvedWorkdayId, null, status, Map.of("cost", reconciliationDelayCost(reconciliationBacklog)));
         if (approvalBacklog > 0) audit(resolvedWorkdayId, "Archive-Ledger", "APPROVAL_BACKLOG_COST_INCURRED", "ledger_workday_result", resolvedWorkdayId, null, status, Map.of("cost", approvalBacklogCost(approvalBacklog)));
         if (callbackBacklog > 0) audit(resolvedWorkdayId, "Archive-Ledger", "CALLBACK_DELAY_COST_INCURRED", "ledger_workday_result", resolvedWorkdayId, null, status, Map.of("cost", callbackDelayCost(callbackBacklog)));
-        return workforceWorkdayResult(resolvedWorkdayId).orElseThrow();
+        WorkforceWorkdayResult result = workforceWorkdayResult(resolvedWorkdayId).orElseThrow();
+        recordSettlementRuntimeBalance(result);
+        return result;
     }
 
     public WorkforceSummary workforceSummary(LocalDate date, String sourceService) {
@@ -356,7 +368,10 @@ public class LedgerService {
         Instant lastWorkAt = lastRuntimeWorkAt == null ? latestWorkResultAt() : lastRuntimeWorkAt;
         boolean active = runtimeAutoRunEnabled && (lastWorkAt != null || lastEventAt != null);
         String schedulerStatus = runtimeAutoRunEnabled ? "RUNNING" : "DISABLED";
-        String pipelineStatus = runtimeAutoRunEnabled ? (backlog > 0 ? "LIVE_WITH_BACKLOG" : "LIVE") : "PAUSED";
+        String pipelineStatus = runtimeAutoRunEnabled
+                ? (lastEventAt == null && lastWorkAt == null ? "WAITING_FOR_DATA" : (backlog > 0 ? "LIVE_WITH_BACKLOG" : "LIVE"))
+                : "PAUSED";
+        String degradedReason = backlog > 0 ? "BACKLOG_PRESENT" : (lastEventAt == null ? "NO_RUNTIME_DATA" : null);
         return new RuntimeStatusResponse(
                 TARGET_LEDGER,
                 active,
@@ -367,7 +382,10 @@ public class LedgerService {
                 lastRuntimeEventsProduced,
                 lastRuntimeEventsConsumed,
                 backlog,
-                pipelineStatus
+                oldestRuntimeBacklogAgeSeconds(),
+                latestRuntimeCursor(),
+                pipelineStatus,
+                degradedReason
         );
     }
 
@@ -396,18 +414,28 @@ public class LedgerService {
             int consumed = 0;
             LocalDate today = LocalDate.now();
 
+            WorkforceWorkdayResult workday = null;
             if (produced < safeMaxEvents) {
-                runWorkday(today, "ArchiveOS", resolvedTickId);
+                workday = runWorkday(today, "ArchiveOS", resolvedTickId, safeMaxBacklog);
                 produced++;
-                consumed += Math.min(backlog, safeMaxBacklog);
+                consumed += workday.transactionsProcessed();
+            }
+            int settlementLimit = workday == null ? 0 : Math.min(safeMaxBacklog, workday.settlementCompletedCount());
+            if (produced < safeMaxEvents && settlementLimit > 0 && hasSettlementReadyTransactions(today)) {
+                SettlementBatchView batch = runSettlement(today, settlementLimit);
+                produced++;
+                consumed += batch.totalTransactionCount();
             }
             if (produced < safeMaxEvents) {
                 reconcile(today);
                 produced++;
             }
-            if (produced < safeMaxEvents && hasSettlementReadyTransactions(today) && count("select count(*) from finance_transaction where status='SETTLEMENT_READY' and cast(occurred_at as date)=?", Date.valueOf(today)) <= safeMaxBacklog) {
-                runDailyBatch(today, "Archive-Ledger-Runtime", "RUNTIME_AUTORUN", true, true);
-                produced++;
+            if (produced < safeMaxEvents) {
+                int callbackRetries = retryPendingApprovalDispatches(Math.min(safeMaxEvents - produced, safeMaxBacklog));
+                if (callbackRetries > 0) {
+                    produced++;
+                    consumed += callbackRetries;
+                }
             }
 
             audit(resolvedTickId, TARGET_LEDGER, "RUNTIME_WORK_TICK", "runtime_work_loop", resolvedTickId,
@@ -521,6 +549,31 @@ public class LedgerService {
         return count("select count(*) from finance_transaction where status in ('APPROVAL_REQUIRED','SETTLEMENT_READY')")
                 + count("select count(*) from received_event where processing_status='FAILED'")
                 + count("select count(*) from approval_request where status='REQUESTED'");
+    }
+
+    private long oldestRuntimeBacklogAgeSeconds() {
+        Instant oldest = null;
+        List<Instant> candidates = new ArrayList<>();
+        candidates.add(queryInstant("select min(created_at) from finance_transaction where status in ('APPROVAL_REQUIRED','SETTLEMENT_READY')"));
+        candidates.add(queryInstant("select min(received_at) from received_event where processing_status='FAILED'"));
+        candidates.add(queryInstant("select min(requested_at) from approval_request where status='REQUESTED'"));
+        for (Instant candidate : candidates) {
+            if (candidate != null && (oldest == null || candidate.isBefore(oldest))) {
+                oldest = candidate;
+            }
+        }
+        return oldest == null ? 0 : Math.max(0, Duration.between(oldest, Instant.now()).toSeconds());
+    }
+
+    private Instant queryInstant(String sql) {
+        return jdbc.query(sql, rs -> rs.next() ? instant(rs.getTimestamp(1)) : null);
+    }
+
+    private String latestRuntimeCursor() {
+        return runtimeEventProjection(1, null, null, null).stream()
+                .map(RuntimeEventView::cursor)
+                .findFirst()
+                .orElse(null);
     }
 
     private WorkforceCapacity workforceCapacity(LocalDate workDate, String sourceService) {
@@ -656,52 +709,217 @@ public class LedgerService {
 
     public SettlementAgencySummary settlementAgencySummary() {
         WorkforceWorkdayResult latest = latestWorkdayResult().orElse(null);
-        int transactionsProcessed = latest == null ? 0 : latest.transactionsProcessed();
-        int settlementCompleted = latest == null ? 0 : latest.settlementCompletedCount();
-        int reconciliationProcessed = latest == null ? 0 : latest.reconciliationProcessedCount();
-        int approvalReviewed = latest == null ? 0 : latest.approvalReviewedCount();
-        int transactionsBacklog = latest == null ? 0 : latest.transactionsBacklog();
-        int settlementBacklog = latest == null ? 0 : latest.settlementBacklog();
-        int reconciliationBacklog = latest == null ? 0 : latest.reconciliationBacklog();
-        int approvalBacklog = latest == null ? 0 : latest.approvalBacklog();
-        int callbackBacklog = latest == null ? 0 : latest.callbackBacklog();
+        AgencyMetrics metrics = agencyMetrics(latest);
+        SettlementBalanceSummary balance = settlementBalanceSummary();
+        return new SettlementAgencySummary(
+                TARGET_LEDGER,
+                metrics.transactionRevenue(),
+                metrics.settlementRevenue(),
+                metrics.reconciliationRevenue(),
+                metrics.approvalRevenue(),
+                metrics.totalRevenue(),
+                metrics.payrollCost(),
+                metrics.settlementBacklogCost(),
+                metrics.reconciliationBacklogCost(),
+                metrics.approvalBacklogCost(),
+                metrics.callbackFailureCost(),
+                metrics.operatingCost(),
+                metrics.operatingProfit(),
+                metrics.transactionsProcessed(),
+                metrics.settlementCompleted(),
+                metrics.reconciliationProcessed(),
+                metrics.approvalReviewed(),
+                metrics.transactionsBacklog(),
+                metrics.settlementBacklog(),
+                metrics.reconciliationBacklog(),
+                metrics.approvalBacklog(),
+                metrics.callbackBacklog(),
+                metrics.productivityScore(),
+                metrics.bottleneckRole(),
+                balance
+        );
+    }
+
+    private AgencyMetrics agencyMetrics(WorkforceWorkdayResult result) {
+        int transactionsProcessed = result == null ? 0 : result.transactionsProcessed();
+        int settlementCompleted = result == null ? 0 : result.settlementCompletedCount();
+        int reconciliationProcessed = result == null ? 0 : result.reconciliationProcessedCount();
+        int approvalReviewed = result == null ? 0 : result.approvalReviewedCount();
+        int transactionsBacklog = result == null ? 0 : result.transactionsBacklog();
+        int settlementBacklog = result == null ? 0 : result.settlementBacklog();
+        int reconciliationBacklog = result == null ? 0 : result.reconciliationBacklog();
+        int approvalBacklog = result == null ? 0 : result.approvalBacklog();
+        int callbackBacklog = result == null ? 0 : result.callbackBacklog();
         BigDecimal transactionRevenue = BigDecimal.valueOf(transactionsProcessed).multiply(new BigDecimal("120"));
         BigDecimal settlementRevenue = BigDecimal.valueOf(settlementCompleted).multiply(new BigDecimal("700"));
         BigDecimal reconciliationRevenue = BigDecimal.valueOf(reconciliationProcessed).multiply(new BigDecimal("500"));
         BigDecimal approvalRevenue = BigDecimal.valueOf(approvalReviewed).multiply(new BigDecimal("900"));
         BigDecimal totalRevenue = transactionRevenue.add(settlementRevenue).add(reconciliationRevenue).add(approvalRevenue);
-        BigDecimal payroll = latest == null ? BigDecimal.ZERO : latest.payrollCost();
+        BigDecimal payroll = result == null ? BigDecimal.ZERO : result.payrollCost();
         BigDecimal settlementCost = settlementBacklogCost(settlementBacklog);
         BigDecimal reconciliationCost = reconciliationDelayCost(reconciliationBacklog);
         BigDecimal approvalCost = approvalBacklogCost(approvalBacklog);
         BigDecimal callbackCost = callbackDelayCost(callbackBacklog);
         BigDecimal totalCost = payroll.add(settlementCost).add(reconciliationCost).add(approvalCost).add(callbackCost);
-        return new SettlementAgencySummary(
-                TARGET_LEDGER,
-                transactionRevenue,
-                settlementRevenue,
-                reconciliationRevenue,
-                approvalRevenue,
-                totalRevenue,
-                payroll,
-                settlementCost,
-                reconciliationCost,
-                approvalCost,
-                callbackCost,
-                totalCost,
-                totalRevenue.subtract(totalCost),
-                transactionsProcessed,
-                settlementCompleted,
-                reconciliationProcessed,
-                approvalReviewed,
-                transactionsBacklog,
-                settlementBacklog,
-                reconciliationBacklog,
-                approvalBacklog,
-                callbackBacklog,
-                latest == null ? BigDecimal.ONE.setScale(4, RoundingMode.HALF_UP) : latest.productivityScore(),
-                latest == null ? null : latest.bottleneckRole()
+        return new AgencyMetrics(
+                transactionRevenue, settlementRevenue, reconciliationRevenue, approvalRevenue, totalRevenue,
+                payroll, settlementCost, reconciliationCost, approvalCost, callbackCost, totalCost,
+                totalRevenue.subtract(totalCost), transactionsProcessed, settlementCompleted, reconciliationProcessed,
+                approvalReviewed, transactionsBacklog, settlementBacklog, reconciliationBacklog, approvalBacklog,
+                callbackBacklog, result == null ? BigDecimal.ZERO.setScale(4, RoundingMode.HALF_UP) : result.productivityScore(),
+                result == null ? "NONE" : value(result.bottleneckRole(), "NONE")
         );
+    }
+
+    private void recordSettlementRuntimeBalance(WorkforceWorkdayResult result) {
+        AgencyMetrics metrics = agencyMetrics(result);
+        WorkforceSummary capacity = workforceSummary(result.workDate(), "ArchiveOS");
+        String settlementCycleId = latestSettlementCycleId(result.workDate());
+        BigDecimal previousCash = previousCashBalance(result.workDate());
+        int previousStreak = previousNegativeProfitStreak(result.workDate());
+        BigDecimal margin = operatingMargin(metrics.operatingProfit(), metrics.totalRevenue());
+        BigDecimal delayRate = settlementDelayRate(metrics.settlementCompleted(), metrics.settlementBacklog());
+        int negativeProfitStreak = metrics.operatingProfit().compareTo(BigDecimal.ZERO) < 0 ? previousStreak + 1 : 0;
+        BigDecimal cashBalance = previousCash.add(metrics.operatingProfit());
+
+        if (exists("select count(*) from ledger_runtime_balance_snapshot where work_date=?", Date.valueOf(result.workDate()))) {
+            jdbc.update("""
+                    update ledger_runtime_balance_snapshot
+                    set settlement_cycle_id=?,transaction_processing_revenue=?,settlement_agency_revenue=?,
+                        reconciliation_revenue=?,approval_review_revenue=?,workforce_cost=?,callback_failure_cost=?,
+                        operating_cost=?,operating_profit=?,operating_margin=?,cash_balance=?,transactions_received=?,
+                        transactions_processed=?,approval_backlog=?,settlement_backlog=?,reconciliation_backlog=?,
+                        callback_backlog=?,capacity_utilization=?,bottleneck_role=?,settlement_delay_rate=?,
+                        negative_profit_streak=?,calculated_at=?
+                    where work_date=?
+                    """,
+                    settlementCycleId, metrics.transactionRevenue(), metrics.settlementRevenue(),
+                    metrics.reconciliationRevenue(), metrics.approvalRevenue(), metrics.payrollCost(), metrics.callbackFailureCost(),
+                    metrics.operatingCost(), metrics.operatingProfit(), margin, cashBalance, result.transactionsReceived(),
+                    metrics.transactionsProcessed(), metrics.approvalBacklog(), metrics.settlementBacklog(),
+                    metrics.reconciliationBacklog(), metrics.callbackBacklog(), capacity.capacityUtilizationRate(),
+                    metrics.bottleneckRole(), delayRate, negativeProfitStreak, ts(Instant.now()), Date.valueOf(result.workDate()));
+            return;
+        }
+
+        jdbc.update("""
+                insert into ledger_runtime_balance_snapshot(
+                    work_date,settlement_cycle_id,transaction_processing_revenue,settlement_agency_revenue,
+                    reconciliation_revenue,approval_review_revenue,workforce_cost,callback_failure_cost,
+                    operating_cost,operating_profit,operating_margin,cash_balance,transactions_received,
+                    transactions_processed,approval_backlog,settlement_backlog,reconciliation_backlog,callback_backlog,
+                    capacity_utilization,bottleneck_role,settlement_delay_rate,negative_profit_streak,calculated_at
+                ) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                Date.valueOf(result.workDate()), settlementCycleId, metrics.transactionRevenue(), metrics.settlementRevenue(),
+                metrics.reconciliationRevenue(), metrics.approvalRevenue(), metrics.payrollCost(), metrics.callbackFailureCost(),
+                metrics.operatingCost(), metrics.operatingProfit(), margin, cashBalance, result.transactionsReceived(),
+                metrics.transactionsProcessed(), metrics.approvalBacklog(), metrics.settlementBacklog(),
+                metrics.reconciliationBacklog(), metrics.callbackBacklog(), capacity.capacityUtilizationRate(),
+                metrics.bottleneckRole(), delayRate, negativeProfitStreak, ts(Instant.now()));
+    }
+
+    private SettlementBalanceSummary settlementBalanceSummary() {
+        List<SettlementBalanceSummary> snapshots = jdbc.query("""
+                select * from ledger_runtime_balance_snapshot
+                order by work_date desc, calculated_at desc limit 1
+                """, this::settlementBalanceRow);
+        if (!snapshots.isEmpty()) {
+            return snapshots.get(0);
+        }
+        WorkforceWorkdayResult latest = latestWorkdayResult().orElse(null);
+        AgencyMetrics metrics = agencyMetrics(latest);
+        BigDecimal utilization = latest == null ? BigDecimal.ZERO.setScale(4, RoundingMode.HALF_UP)
+                : workforceSummary(latest.workDate(), "ArchiveOS").capacityUtilizationRate();
+        return balanceFromMetrics(
+                latest == null ? null : latest.workDate(),
+                latest == null ? null : latestSettlementCycleId(latest.workDate()),
+                latest,
+                metrics,
+                utilization,
+                metrics.operatingProfit(),
+                metrics.operatingProfit().compareTo(BigDecimal.ZERO) < 0 ? 1 : 0,
+                Instant.now()
+        );
+    }
+
+    private SettlementBalanceSummary settlementBalanceRow(java.sql.ResultSet rs, int row) throws java.sql.SQLException {
+        return new SettlementBalanceSummary(
+                TARGET_LEDGER,
+                rs.getString("settlement_cycle_id"),
+                rs.getBigDecimal("transaction_processing_revenue"),
+                rs.getBigDecimal("settlement_agency_revenue"),
+                rs.getBigDecimal("reconciliation_revenue"),
+                rs.getBigDecimal("approval_review_revenue"),
+                rs.getBigDecimal("workforce_cost"),
+                rs.getBigDecimal("callback_failure_cost"),
+                rs.getBigDecimal("operating_cost"),
+                rs.getBigDecimal("operating_profit"),
+                rs.getBigDecimal("operating_margin"),
+                rs.getBigDecimal("cash_balance"),
+                rs.getInt("transactions_received"),
+                rs.getInt("transactions_processed"),
+                rs.getInt("approval_backlog"),
+                rs.getInt("settlement_backlog"),
+                rs.getInt("reconciliation_backlog"),
+                rs.getInt("callback_backlog"),
+                rs.getBigDecimal("capacity_utilization"),
+                value(rs.getString("bottleneck_role"), "NONE"),
+                rs.getBigDecimal("settlement_delay_rate"),
+                rs.getInt("negative_profit_streak"),
+                instant(rs.getTimestamp("calculated_at"))
+        );
+    }
+
+    private SettlementBalanceSummary balanceFromMetrics(LocalDate workDate, String settlementCycleId,
+                                                         WorkforceWorkdayResult result, AgencyMetrics metrics,
+                                                         BigDecimal utilization, BigDecimal cashBalance,
+                                                         int negativeProfitStreak, Instant calculatedAt) {
+        return new SettlementBalanceSummary(
+                TARGET_LEDGER,
+                settlementCycleId,
+                metrics.transactionRevenue(), metrics.settlementRevenue(), metrics.reconciliationRevenue(),
+                metrics.approvalRevenue(), metrics.payrollCost(), metrics.callbackFailureCost(), metrics.operatingCost(),
+                metrics.operatingProfit(), operatingMargin(metrics.operatingProfit(), metrics.totalRevenue()), cashBalance,
+                result == null ? 0 : result.transactionsReceived(), metrics.transactionsProcessed(), metrics.approvalBacklog(),
+                metrics.settlementBacklog(), metrics.reconciliationBacklog(), metrics.callbackBacklog(), utilization,
+                metrics.bottleneckRole(), settlementDelayRate(metrics.settlementCompleted(), metrics.settlementBacklog()),
+                negativeProfitStreak, calculatedAt
+        );
+    }
+
+    private String latestSettlementCycleId(LocalDate workDate) {
+        return jdbc.query("""
+                select settlement_cycle_id from received_event
+                where cast(received_at as date)=? and settlement_cycle_id is not null
+                order by received_at desc limit 1
+                """, rs -> rs.next() ? rs.getString(1) : null, Date.valueOf(workDate));
+    }
+
+    private BigDecimal previousCashBalance(LocalDate workDate) {
+        return jdbc.query("""
+                select cash_balance from ledger_runtime_balance_snapshot
+                where work_date<? order by work_date desc limit 1
+                """, rs -> rs.next() ? rs.getBigDecimal(1) : BigDecimal.ZERO, Date.valueOf(workDate));
+    }
+
+    private int previousNegativeProfitStreak(LocalDate workDate) {
+        return jdbc.query("""
+                select negative_profit_streak from ledger_runtime_balance_snapshot
+                where work_date<? order by work_date desc limit 1
+                """, rs -> rs.next() ? rs.getInt(1) : 0, Date.valueOf(workDate));
+    }
+
+    private BigDecimal operatingMargin(BigDecimal profit, BigDecimal revenue) {
+        return revenue.compareTo(BigDecimal.ZERO) == 0
+                ? BigDecimal.ZERO.setScale(4, RoundingMode.HALF_UP)
+                : profit.divide(revenue, 4, RoundingMode.HALF_UP);
+    }
+
+    private BigDecimal settlementDelayRate(int completed, int backlog) {
+        int total = completed + backlog;
+        return total == 0 ? BigDecimal.ZERO.setScale(4, RoundingMode.HALF_UP)
+                : BigDecimal.valueOf(backlog).divide(BigDecimal.valueOf(total), 4, RoundingMode.HALF_UP);
     }
 
     private EventIngestionResponse ingestWithSource(NexusEventRequest request) {
@@ -899,6 +1117,12 @@ public class LedgerService {
     public Map<String, Object> approvalCallback(ApprovalCallbackRequest request) {
         String next = "APPROVED".equalsIgnoreCase(request.decision()) ? "SETTLEMENT_READY" : "REJECTED";
         String before = jdbc.queryForObject("select status from finance_transaction where transaction_id=?", String.class, request.transactionId());
+        if (!"APPROVAL_REQUIRED".equals(before)) {
+            audit(request.transactionId(), value(request.decidedBy(), "synthetic-operator"), "DUPLICATE_APPROVAL_CALLBACK",
+                    "finance_transaction", request.transactionId(), before, before,
+                    Map.of("approvalRequestId", request.approvalRequestId(), "decision", request.decision()));
+            return Map.of("transactionId", request.transactionId(), "previousStatus", before, "status", before, "duplicate", true);
+        }
         jdbc.update("update finance_transaction set status=?, updated_at=? where transaction_id=?", next, ts(Instant.now()), request.transactionId());
         jdbc.update("""
                 update approval_request
@@ -913,19 +1137,89 @@ public class LedgerService {
         );
         audit(request.transactionId(), value(request.decidedBy(), "synthetic-operator"), "APPROVAL_CALLBACK",
                 "finance_transaction", request.transactionId(), before, next, Map.of("comment", value(request.comment(), "")));
-        return Map.of("transactionId", request.transactionId(), "previousStatus", before, "status", next);
+        return Map.of("transactionId", request.transactionId(), "previousStatus", before, "status", next, "duplicate", false);
+    }
+
+    private int retryPendingApprovalDispatches(int requestedAttempts) {
+        if (!archiveOs.enabled() || requestedAttempts <= 0 || callbackRetryLimit == 0) {
+            return 0;
+        }
+        int safeAttempts = Math.min(requestedAttempts, callbackRetryLimit);
+        List<Map<String, Object>> requests = jdbc.queryForList("""
+                select ar.approval_request_id, ar.transaction_id, ar.amount, ar.reason,
+                       ft.currency, ft.source_service, ft.transaction_type, ft.factory_id, ft.vendor_id,
+                       re.event_type, re.simulation_run_id, re.settlement_cycle_id, re.correlation_id, re.causation_id
+                from approval_request ar
+                join finance_transaction ft on ft.transaction_id=ar.transaction_id
+                left join received_event re on re.event_id=ft.source_event_id
+                where ar.status='REQUESTED'
+                  and exists (
+                    select 1 from audit_log al
+                    where al.action='ARCHIVEOS_APPROVAL_DEGRADED'
+                      and al.target_id=ar.approval_request_id
+                  )
+                order by ar.requested_at asc
+                limit ?
+                """, safeAttempts);
+        int delivered = 0;
+        for (Map<String, Object> row : requests) {
+            String approvalRequestId = String.valueOf(row.get("approval_request_id"));
+            int failureCount = count("select count(*) from audit_log where action='ARCHIVEOS_APPROVAL_DEGRADED' and target_id=?", approvalRequestId);
+            if (failureCount >= callbackRetryLimit) {
+                continue;
+            }
+            String transactionId = String.valueOf(row.get("transaction_id"));
+            Map<String, Object> metadata = new HashMap<>();
+            metadata.put("sourceService", row.get("source_service"));
+            metadata.put("eventType", row.get("event_type"));
+            metadata.put("transactionType", row.get("transaction_type"));
+            putIfPresent(metadata, "factoryId", row.get("factory_id"));
+            putIfPresent(metadata, "vendorId", row.get("vendor_id"));
+            putIfPresent(metadata, "simulationRunId", row.get("simulation_run_id"));
+            putIfPresent(metadata, "settlementCycleId", row.get("settlement_cycle_id"));
+            putIfPresent(metadata, "correlationId", row.get("correlation_id"));
+            putIfPresent(metadata, "causationId", row.get("causation_id"));
+            metadata.put("retryAttempt", failureCount + 1);
+            try {
+                archiveOs.requestApproval(
+                        approvalRequestId,
+                        transactionId,
+                        (BigDecimal) row.get("amount"),
+                        String.valueOf(row.get("currency")),
+                        String.valueOf(row.get("reason")),
+                        metadata
+                );
+                audit(transactionId, TARGET_LEDGER, "ARCHIVEOS_APPROVAL_RETRY_SENT", "approval_request", approvalRequestId,
+                        "REQUESTED", "REQUESTED", Map.of("retryAttempt", failureCount + 1));
+                delivered++;
+            } catch (RuntimeException error) {
+                audit(transactionId, TARGET_LEDGER, "ARCHIVEOS_APPROVAL_DEGRADED", "approval_request", approvalRequestId,
+                        "REQUESTED", "REQUESTED", Map.of("retryAttempt", failureCount + 1, "error", value(error.getMessage(), error.getClass().getSimpleName())));
+            }
+        }
+        return delivered;
     }
 
     @Transactional
     public SettlementBatchView runSettlement(LocalDate date) {
+        return runSettlement(date, Integer.MAX_VALUE);
+    }
+
+    private SettlementBatchView runSettlement(LocalDate date, int maxTransactions) {
         Instant started = Instant.now();
         String batchId = "SET-" + date.toString().replace("-", "") + "-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase(Locale.ROOT);
+        int safeLimit = maxTransactions == Integer.MAX_VALUE
+                ? Integer.MAX_VALUE
+                : Math.max(0, Math.min(maxTransactions, 1000));
         jdbc.update("insert into settlement_batch(batch_id,settlement_date,status,total_transaction_count,total_amount,started_at) values(?,?,?,?,?,?)",
                 batchId, Date.valueOf(date), "RUNNING", 0, BigDecimal.ZERO, ts(started));
+        audit(batchId, TARGET_LEDGER, "SETTLEMENT_STARTED", "settlement_batch", batchId,
+                null, "RUNNING", Map.of("settlementDate", date.toString(), "maxTransactions", safeLimit));
 
         try {
             List<TransactionView> candidates = transactionsByStatus("SETTLEMENT_READY").stream()
                     .filter(tx -> LocalDate.ofInstant(tx.occurredAt(), ZoneId.systemDefault()).equals(date))
+                    .limit(safeLimit)
                     .toList();
             BigDecimal total = BigDecimal.ZERO;
             for (TransactionView tx : candidates) {
@@ -1176,25 +1470,29 @@ public class LedgerService {
     }
 
     public List<RuntimeEventView> recentRuntimeEvents(int limit) {
+        return recentRuntimeEvents(limit, null);
+    }
+
+    public List<RuntimeEventView> recentRuntimeEvents(int limit, String after) {
         int safeLimit = Math.max(1, Math.min(limit, 500));
-        return runtimeEventProjection(safeLimit, null, null);
+        return runtimeEventProjection(safeLimit, null, null, after);
     }
 
     public List<RuntimeEventView> runtimeEventsByCorrelation(String correlationId) {
         if (correlationId == null || correlationId.isBlank()) {
             return List.of();
         }
-        return runtimeEventProjection(500, correlationId, null);
+        return runtimeEventProjection(500, correlationId, null, null);
     }
 
     public List<RuntimeEventView> runtimeEventsByEntity(String entityId) {
         if (entityId == null || entityId.isBlank()) {
             return List.of();
         }
-        return runtimeEventProjection(500, null, entityId);
+        return runtimeEventProjection(500, null, entityId, null);
     }
 
-    private List<RuntimeEventView> runtimeEventProjection(int limit, String correlationId, String entityId) {
+    private List<RuntimeEventView> runtimeEventProjection(int limit, String correlationId, String entityId, String after) {
         List<RuntimeEventView> events = new ArrayList<>();
         events.addAll(runtimeReceivedEvents(limit, correlationId, entityId));
         events.addAll(runtimeTransactionEvents(limit, correlationId, entityId));
@@ -1206,6 +1504,8 @@ public class LedgerService {
         events.addAll(runtimeWorkforceEvents(limit, entityId));
         return events.stream()
                 .sorted(Comparator.comparing(RuntimeEventView::occurredAt, Comparator.nullsLast(Comparator.naturalOrder())).reversed())
+                .map(this::withRuntimeCursor)
+                .filter(event -> isAfterCursor(event, after))
                 .limit(limit)
                 .toList();
     }
@@ -1229,7 +1529,8 @@ public class LedgerService {
     private List<RuntimeEventView> runtimeTransactionEvents(int limit, String correlationId, String entityId) {
         StringBuilder sql = new StringBuilder("""
                 select ft.*, re.source_service as event_source_service, re.event_type as source_event_type,
-                       re.correlation_id, re.causation_id, re.simulation_run_id, re.settlement_cycle_id, re.payload
+                       re.correlation_id, re.causation_id, re.simulation_run_id, re.settlement_cycle_id,
+                       re.hop_count, re.max_hop, re.payload
                 from finance_transaction ft
                 left join received_event re on re.event_id = ft.source_event_id
                 where 1=1
@@ -1254,7 +1555,8 @@ public class LedgerService {
     private List<RuntimeEventView> runtimeLedgerEntryEvents(int limit, String correlationId, String entityId) {
         StringBuilder sql = new StringBuilder("""
                 select ft.transaction_id, ft.source_service, ft.source_event_id, ft.transaction_type, ft.amount,
-                       ft.factory_id, ft.vendor_id, re.correlation_id, re.causation_id, min(le.created_at) as created_at,
+                       ft.factory_id, ft.vendor_id, re.correlation_id, re.causation_id, re.simulation_run_id,
+                       re.settlement_cycle_id, re.hop_count, re.max_hop, re.payload, min(le.created_at) as created_at,
                        count(*) as entry_count
                 from ledger_entry le
                 join finance_transaction ft on ft.transaction_id = le.transaction_id
@@ -1265,7 +1567,8 @@ public class LedgerService {
         appendRuntimeFilters(sql, args, correlationId, entityId, "re", "ft");
         sql.append("""
                 group by ft.transaction_id, ft.source_service, ft.source_event_id, ft.transaction_type, ft.amount,
-                         ft.factory_id, ft.vendor_id, re.correlation_id, re.causation_id
+                         ft.factory_id, ft.vendor_id, re.correlation_id, re.causation_id, re.simulation_run_id,
+                         re.settlement_cycle_id, re.hop_count, re.max_hop, re.payload
                 order by min(le.created_at) desc limit ?
                 """);
         args.add(limit);
@@ -1274,6 +1577,11 @@ public class LedgerService {
             metadata.put("transactionId", rs.getString("transaction_id"));
             metadata.put("transactionType", rs.getString("transaction_type"));
             metadata.put("entryCount", rs.getInt("entry_count"));
+            putIfPresent(metadata, "simulationRunId", rs.getString("simulation_run_id"));
+            putIfPresent(metadata, "settlementCycleId", rs.getString("settlement_cycle_id"));
+            putIfPresent(metadata, "hopCount", rs.getObject("hop_count"));
+            putIfPresent(metadata, "maxHop", rs.getObject("max_hop"));
+            copySyntheticPayload(metadata, readPayload(rs.getString("payload")), "workdayId");
             return runtimeView(
                     "rt-ledger-entry-" + rs.getString("transaction_id"),
                     value(rs.getString("source_service"), TARGET_LEDGER),
@@ -1295,7 +1603,8 @@ public class LedgerService {
     private List<RuntimeEventView> runtimeApprovalEvents(int limit, String correlationId, String entityId) {
         StringBuilder sql = new StringBuilder("""
                 select ar.*, ft.source_service, ft.source_event_id, ft.transaction_type,
-                       re.correlation_id, re.causation_id
+                       re.correlation_id, re.causation_id, re.simulation_run_id, re.settlement_cycle_id,
+                       re.hop_count, re.max_hop, re.payload
                 from approval_request ar
                 join finance_transaction ft on ft.transaction_id = ar.transaction_id
                 left join received_event re on re.event_id = ft.source_event_id
@@ -1322,6 +1631,11 @@ public class LedgerService {
             metadata.put("approvalRequestId", rs.getString("approval_request_id"));
             metadata.put("transactionId", rs.getString("transaction_id"));
             metadata.put("transactionType", rs.getString("transaction_type"));
+            putIfPresent(metadata, "simulationRunId", rs.getString("simulation_run_id"));
+            putIfPresent(metadata, "settlementCycleId", rs.getString("settlement_cycle_id"));
+            putIfPresent(metadata, "hopCount", rs.getObject("hop_count"));
+            putIfPresent(metadata, "maxHop", rs.getObject("max_hop"));
+            copySyntheticPayload(metadata, readPayload(rs.getString("payload")), "workdayId");
             Instant occurredAt = instant(rs.getTimestamp("decided_at"));
             if (occurredAt == null) {
                 occurredAt = instant(rs.getTimestamp("requested_at"));
@@ -1348,7 +1662,7 @@ public class LedgerService {
         if (correlationId != null && !correlationId.isBlank()) {
             return List.of();
         }
-        StringBuilder sql = new StringBuilder("select * from settlement_batch where status='SUCCESS'");
+        StringBuilder sql = new StringBuilder("select * from settlement_batch where status in ('RUNNING','SUCCESS','FAILED')");
         List<Object> args = new ArrayList<>();
         if (entityId != null && !entityId.isBlank()) {
             sql.append(" and batch_id=?");
@@ -1357,26 +1671,45 @@ public class LedgerService {
         sql.append(" order by completed_at desc limit ?");
         args.add(limit);
         return jdbc.query(sql.toString(), (rs, row) -> {
+            List<RuntimeEventView> projected = new ArrayList<>();
             Map<String, Object> metadata = maskedAmountMetadata(rs.getBigDecimal("total_amount"));
             metadata.put("batchId", rs.getString("batch_id"));
             metadata.put("settlementDate", rs.getDate("settlement_date").toString());
             metadata.put("transactionCount", rs.getInt("total_transaction_count"));
-            return runtimeView(
-                    "rt-settlement-" + rs.getString("batch_id"),
+            projected.add(runtimeView(
+                    "rt-settlement-started-" + rs.getString("batch_id"),
                     TARGET_LEDGER,
                     "settlement",
-                    "SETTLEMENT_COMPLETED",
+                    "SETTLEMENT_STARTED",
                     "settlement_batch",
                     rs.getString("batch_id"),
                     null,
                     null,
-                    "settled",
-                    "normal",
-                    "일 정산 완료 " + rs.getInt("total_transaction_count") + "건",
-                    instant(rs.getTimestamp("completed_at")),
+                    "processing",
+                    "info",
+                    "일 정산 시작",
+                    instant(rs.getTimestamp("started_at")),
                     metadata
-            );
-        }, args.toArray());
+            ));
+            if ("SUCCESS".equals(rs.getString("status"))) {
+                projected.add(runtimeView(
+                        "rt-settlement-completed-" + rs.getString("batch_id"),
+                        TARGET_LEDGER,
+                        "settlement",
+                        "SETTLEMENT_COMPLETED",
+                        "settlement_batch",
+                        rs.getString("batch_id"),
+                        null,
+                        null,
+                        "settled",
+                        "normal",
+                        "일 정산 완료 " + rs.getInt("total_transaction_count") + "건",
+                        instant(rs.getTimestamp("completed_at")),
+                        metadata
+                ));
+            }
+            return projected;
+        }, args.toArray()).stream().flatMap(List::stream).toList();
     }
 
     private List<RuntimeEventView> runtimeReconciliationEvents(int limit) {
@@ -1596,11 +1929,15 @@ public class LedgerService {
         String status = failed > 0 ? "DEGRADED" : "HEALTHY";
         WorkforceSummary workforce = workforceSummary(LocalDate.now(), "ArchiveOS");
         SettlementAgencySummary agency = settlementAgencySummary();
+        SettlementBalanceSummary balance = agency.balance();
         RuntimeOutboxSummary outbox = new RuntimeOutboxSummary(0, 0, 0, 0);
         RuntimeEconomySummary economy = new RuntimeEconomySummary(
-                agency.totalRevenue(),
-                agency.totalCost(),
-                agency.netRevenue()
+                balance.transactionProcessingRevenue()
+                        .add(balance.settlementAgencyRevenue())
+                        .add(balance.reconciliationRevenue())
+                        .add(balance.approvalReviewRevenue()),
+                balance.operatingCost(),
+                balance.operatingProfit()
         );
         RuntimeWorkforceSummary runtimeWorkforce = new RuntimeWorkforceSummary(
                 workforce.assignedUnits(),
@@ -1647,7 +1984,8 @@ public class LedgerService {
                 settlementCompleted,
                 reconciliationWarnings,
                 callbackFailed,
-                runtimeStatus()
+                runtimeStatus(),
+                balance
         );
     }
 
@@ -2052,19 +2390,26 @@ public class LedgerService {
         );
         String status = runtimeStatus(processingStatus, transactionStatus);
         String severity = runtimeSeverity(status, eventType, rs.getBigDecimal("risk_score"));
-        return new RuntimeEventView(
+        return runtimeView(
                 rs.getString("event_id"),
+                rs.getString("idempotency_key"),
                 sourceService,
+                TARGET_LEDGER,
                 runtimeDomain(sourceService),
                 eventType,
                 entityType,
                 entityId,
                 rs.getString("correlation_id"),
                 rs.getString("causation_id"),
+                rs.getString("simulation_run_id"),
+                rs.getString("settlement_cycle_id"),
+                text(payload.get("workdayId")),
                 status,
                 severity,
                 runtimeDisplayLabel(sourceService, eventType, status),
                 instant(rs.getTimestamp("received_at")),
+                rs.getInt("hop_count"),
+                rs.getObject("max_hop") == null ? 5 : rs.getInt("max_hop"),
                 metadata
         );
     }
@@ -2104,7 +2449,9 @@ public class LedgerService {
         putIfPresent(metadata, "vendorId", rs.getString("vendor_id"));
         putIfPresent(metadata, "simulationRunId", rs.getString("simulation_run_id"));
         putIfPresent(metadata, "settlementCycleId", rs.getString("settlement_cycle_id"));
-        copySyntheticPayload(metadata, payload, "orderId", "paymentId", "returnId", "claimId", "customerType", "priority");
+        putIfPresent(metadata, "hopCount", rs.getObject("hop_count"));
+        putIfPresent(metadata, "maxHop", rs.getObject("max_hop"));
+        copySyntheticPayload(metadata, payload, "workdayId", "orderId", "paymentId", "returnId", "claimId", "customerType", "priority");
         String sourceService = value(rs.getString("source_service"), rs.getString("event_source_service"));
         return runtimeView(
                 "rt-transaction-" + eventType + "-" + rs.getString("transaction_id"),
@@ -2127,8 +2474,149 @@ public class LedgerService {
                                          String entityType, String entityId, String correlationId, String causationId,
                                          String status, String severity, String displayLabel, Instant occurredAt,
                                          Map<String, Object> metadata) {
-        return new RuntimeEventView(eventId, sourceService, domain, eventType, entityType, entityId,
-                correlationId, causationId, status, severity, displayLabel, occurredAt, metadata);
+        return runtimeView(
+                eventId,
+                "RUNTIME:" + eventId,
+                sourceService,
+                TARGET_LEDGER.equals(sourceService) ? "ArchiveOS" : TARGET_LEDGER,
+                domain,
+                eventType,
+                entityType,
+                entityId,
+                correlationId,
+                causationId,
+                text(metadata.get("simulationRunId")),
+                text(metadata.get("settlementCycleId")),
+                text(metadata.get("workdayId")),
+                status,
+                severity,
+                displayLabel,
+                occurredAt,
+                integer(metadata.get("hopCount"), 0),
+                integer(metadata.get("maxHop"), 5),
+                metadata
+        );
+    }
+
+    private RuntimeEventView runtimeView(String eventId, String idempotencyKey, String sourceService,
+                                         String targetService, String domain, String eventType, String entityType,
+                                         String entityId, String correlationId, String causationId,
+                                         String simulationRunId, String settlementCycleId, String workdayId,
+                                         String status, String severity, String displayLabel, Instant occurredAt,
+                                         int hopCount, int maxHop, Map<String, Object> metadata) {
+        return new RuntimeEventView(
+                eventId,
+                idempotencyKey,
+                sourceService,
+                targetService,
+                domain,
+                eventType,
+                entityType,
+                entityId,
+                correlationId,
+                causationId,
+                simulationRunId,
+                settlementCycleId,
+                workdayId,
+                runtimeStatusCode(status),
+                runtimeSeverityCode(severity),
+                displayLabel,
+                occurredAt,
+                Math.max(0, hopCount),
+                Math.max(1, maxHop),
+                null,
+                metadata
+        );
+    }
+
+    private String runtimeStatusCode(String status) {
+        return switch (value(status, "unavailable").toLowerCase(Locale.ROOT)) {
+            case "created" -> "CREATED";
+            case "processing" -> "PROCESSING";
+            case "waiting", "approval_required" -> "WAITING";
+            case "completed", "approved" -> "COMPLETED";
+            case "delayed" -> "DELAYED";
+            case "settled" -> "SETTLED";
+            case "failed", "rejected" -> "FAILED";
+            default -> "FAILED";
+        };
+    }
+
+    private String runtimeSeverityCode(String severity) {
+        return switch (value(severity, "warning").toLowerCase(Locale.ROOT)) {
+            case "normal" -> "NORMAL";
+            case "info" -> "INFO";
+            case "warning" -> "WARNING";
+            case "critical" -> "CRITICAL";
+            default -> "WARNING";
+        };
+    }
+
+    private RuntimeEventView withRuntimeCursor(RuntimeEventView event) {
+        String cursor = runtimeCursor(event.occurredAt(), event.eventId());
+        return new RuntimeEventView(
+                event.eventId(),
+                event.idempotencyKey(),
+                event.sourceService(),
+                event.targetService(),
+                event.domain(),
+                event.eventType(),
+                event.entityType(),
+                event.entityId(),
+                event.correlationId(),
+                event.causationId(),
+                event.simulationRunId(),
+                event.settlementCycleId(),
+                event.workdayId(),
+                event.status(),
+                event.severity(),
+                event.displayLabel(),
+                event.occurredAt(),
+                event.hopCount(),
+                event.maxHop(),
+                cursor,
+                event.metadata()
+        );
+    }
+
+    private String runtimeCursor(Instant occurredAt, String eventId) {
+        long epochMillis = occurredAt == null ? 0 : occurredAt.toEpochMilli();
+        String encodedEventId = Base64.getUrlEncoder().withoutPadding()
+                .encodeToString(value(eventId, "runtime-event").getBytes(StandardCharsets.UTF_8));
+        return epochMillis + "." + encodedEventId;
+    }
+
+    private boolean isAfterCursor(RuntimeEventView event, String after) {
+        if (after == null || after.isBlank()) {
+            return true;
+        }
+        int separator = after.indexOf('.');
+        if (separator < 1 || separator == after.length() - 1) {
+            return false;
+        }
+        try {
+            long afterMillis = Long.parseLong(after.substring(0, separator));
+            String afterEventId = new String(Base64.getUrlDecoder().decode(after.substring(separator + 1)), StandardCharsets.UTF_8);
+            long eventMillis = event.occurredAt() == null ? 0 : event.occurredAt().toEpochMilli();
+            return eventMillis > afterMillis
+                    || (eventMillis == afterMillis && value(event.eventId(), "").compareTo(afterEventId) > 0);
+        } catch (IllegalArgumentException ignored) {
+            return false;
+        }
+    }
+
+    private int integer(Object value, int fallback) {
+        if (value instanceof Number number) {
+            return number.intValue();
+        }
+        if (value != null) {
+            try {
+                return Integer.parseInt(value.toString());
+            } catch (NumberFormatException ignored) {
+                // Runtime metadata may be absent or a non-numeric compatibility value.
+            }
+        }
+        return fallback;
     }
 
     private String runtimeReceivedEventType(String sourceService) {
@@ -2703,6 +3191,33 @@ public class LedgerService {
         int capacityFor(String role) {
             return roleCapacities.getOrDefault(role, activeAllocations == 0 ? LEDGER_BASELINE_DAILY_CAPACITY : 0);
         }
+    }
+
+    private record AgencyMetrics(
+            BigDecimal transactionRevenue,
+            BigDecimal settlementRevenue,
+            BigDecimal reconciliationRevenue,
+            BigDecimal approvalRevenue,
+            BigDecimal totalRevenue,
+            BigDecimal payrollCost,
+            BigDecimal settlementBacklogCost,
+            BigDecimal reconciliationBacklogCost,
+            BigDecimal approvalBacklogCost,
+            BigDecimal callbackFailureCost,
+            BigDecimal operatingCost,
+            BigDecimal operatingProfit,
+            int transactionsProcessed,
+            int settlementCompleted,
+            int reconciliationProcessed,
+            int approvalReviewed,
+            int transactionsBacklog,
+            int settlementBacklog,
+            int reconciliationBacklog,
+            int approvalBacklog,
+            int callbackBacklog,
+            BigDecimal productivityScore,
+            String bottleneckRole
+    ) {
     }
 
     private record WorkdayDemand(

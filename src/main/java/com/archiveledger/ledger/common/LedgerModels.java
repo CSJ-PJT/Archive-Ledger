@@ -71,17 +71,25 @@ public final class LedgerModels {
 
     public record RuntimeEventView(
             String eventId,
+            String idempotencyKey,
             String sourceService,
+            String targetService,
             String domain,
             String eventType,
             String entityType,
             String entityId,
             String correlationId,
             String causationId,
+            String simulationRunId,
+            String settlementCycleId,
+            String workdayId,
             String status,
             String severity,
             String displayLabel,
             Instant occurredAt,
+            int hopCount,
+            int maxHop,
+            String cursor,
             Map<String, Object> metadata
     ) {
     }
@@ -135,7 +143,8 @@ public final class LedgerModels {
                                     long settlementCompleted,
                                     long reconciliationWarnings,
                                     long callbackFailed,
-                                    RuntimeStatusResponse runtime) {
+                                    RuntimeStatusResponse runtime,
+                                    SettlementBalanceSummary balance) {
     }
 
     public record RuntimeOutboxSummary(long pending, long published, long failed, long retry) {
@@ -157,7 +166,10 @@ public final class LedgerModels {
             int eventsProducedLastTick,
             int eventsConsumedLastTick,
             int backlogCount,
-            String pipelineStatus
+            long oldestBacklogAgeSeconds,
+            String latestCursor,
+            String pipelineStatus,
+            String degradedReason
     ) {
     }
 
@@ -334,7 +346,35 @@ public final class LedgerModels {
             int approvalBacklog,
             int callbackBacklog,
             BigDecimal workforceProductivityScore,
-            String bottleneckRole
+            String bottleneckRole,
+            SettlementBalanceSummary balance
+    ) {
+    }
+
+    public record SettlementBalanceSummary(
+            String service,
+            String settlementCycleId,
+            BigDecimal transactionProcessingRevenue,
+            BigDecimal settlementAgencyRevenue,
+            BigDecimal reconciliationRevenue,
+            BigDecimal approvalReviewRevenue,
+            BigDecimal workforceCost,
+            BigDecimal callbackFailureCost,
+            BigDecimal operatingCost,
+            BigDecimal operatingProfit,
+            BigDecimal operatingMargin,
+            BigDecimal cashBalance,
+            int transactionsReceived,
+            int transactionsProcessed,
+            int approvalBacklog,
+            int settlementBacklog,
+            int reconciliationBacklog,
+            int callbackBacklog,
+            BigDecimal capacityUtilization,
+            String bottleneckRole,
+            BigDecimal settlementDelayRate,
+            int negativeProfitStreak,
+            Instant calculatedAt
     ) {
     }
 }

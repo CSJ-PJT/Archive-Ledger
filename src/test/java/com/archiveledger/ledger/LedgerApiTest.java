@@ -1048,6 +1048,7 @@ class LedgerApiTest {
         assertThat(first.eventsProduced()).isLessThanOrEqualTo(1);
         assertThat(first.duplicate()).isFalse();
         assertThat(count("select count(*) from ledger_workday_result where workday_id=?", "LEDGER-RUNTIME-TICK-TEST")).isEqualTo(1);
+        assertThat(count("select count(*) from finance_transaction where status='APPROVAL_REQUIRED'")).isEqualTo(3);
 
         long workdayCount = count("select count(*) from ledger_workday_result");
         var second = ledger.autonomousRuntimeTick("LEDGER-RUNTIME-TICK-TEST", 1, 50);
@@ -1061,7 +1062,52 @@ class LedgerApiTest {
                 .andExpect(jsonPath("$.lastWorkAt").exists())
                 .andExpect(jsonPath("$.lastEventAt").exists())
                 .andExpect(jsonPath("$.eventsProducedLastTick").value(0))
+                .andExpect(jsonPath("$.oldestBacklogAgeSeconds").exists())
+                .andExpect(jsonPath("$.latestCursor").exists())
                 .andExpect(jsonPath("$.pipelineStatus").exists());
+    }
+
+    @Test
+    void runtimeEventsExposeRuntimeMeshHeadersAndSupportCursorPolling() throws Exception {
+        clearTablesForDeterministicReconciliation();
+        String eventId = logisticsEventId().replace("LG", "MK");
+        String orderId = "ORDER-MESH-" + nextId("ORD");
+
+        mvc.perform(post("/api/events/market")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(mapper.writeValueAsString(marketEvent("Archive-Market", eventId,
+                                logisticsIdempotency().replace("LG", "MK"), "SALES_REVENUE_CONFIRMED", Map.of(
+                                        "orderId", orderId,
+                                        "amount", 80_000L,
+                                        "currency", "KRW",
+                                        "simulationRunId", "SIM-MESH",
+                                        "settlementCycleId", "CYCLE-MESH",
+                                        "correlationId", "CORR-MESH-" + nextId("CORR"),
+                                        "causationId", "CAUSE-MESH",
+                                        "workdayId", "WORKDAY-MESH",
+                                        "hopCount", 1,
+                                        "maxHop", 5
+                                )))))
+                .andExpect(status().isOk());
+
+        String response = mvc.perform(get("/api/runtime-events/recent").param("limit", "100"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].eventId").exists())
+                .andExpect(jsonPath("$[0].idempotencyKey").exists())
+                .andExpect(jsonPath("$[0].sourceService").exists())
+                .andExpect(jsonPath("$[0].targetService").exists())
+                .andExpect(jsonPath("$[0].simulationRunId").exists())
+                .andExpect(jsonPath("$[0].settlementCycleId").exists())
+                .andExpect(jsonPath("$[0].hopCount").exists())
+                .andExpect(jsonPath("$[0].maxHop").exists())
+                .andExpect(jsonPath("$[0].cursor").exists())
+                .andReturn().getResponse().getContentAsString();
+        JsonNode events = mapper.readTree(response);
+        String oldestCursor = events.get(events.size() - 1).get("cursor").asText();
+
+        mvc.perform(get("/api/runtime-events/recent").param("after", oldestCursor).param("limit", "100"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].cursor").exists());
     }
 
     @Test
@@ -1176,6 +1222,98 @@ class LedgerApiTest {
     }
 
     @Test
+    void autonomousTickLimitsSettlementByCapacityAndExposesBalanceMetrics() throws Exception {
+        clearTablesForDeterministicReconciliation();
+        LocalDate workDate = LocalDate.now();
+        insertSettlementReadyTransactions(workDate, 55);
+
+        var tick = ledger.autonomousRuntimeTick("LEDGER-SETTLEMENT-CAPACITY-" + nextId("TICK"), 3, 10);
+
+        assertThat(tick.eventsProduced()).isLessThanOrEqualTo(3);
+        assertThat(count("select count(*) from finance_transaction where status='SETTLED'")).isEqualTo(10);
+        assertThat(count("select count(*) from finance_transaction where status='SETTLEMENT_READY'")).isEqualTo(45);
+        assertThat(jdbc.queryForObject("select total_transaction_count from settlement_batch where status='SUCCESS'", Integer.class)).isEqualTo(10);
+
+        mvc.perform(get("/api/runtime-events/recent").param("limit", "100"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[*].eventType", Matchers.hasItems("SETTLEMENT_STARTED", "SETTLEMENT_COMPLETED")));
+
+        mvc.perform(get("/api/settlement-agency/summary"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.balance.transactionProcessingRevenue").exists())
+                .andExpect(jsonPath("$.balance.settlementAgencyRevenue").exists())
+                .andExpect(jsonPath("$.balance.workforceCost").exists())
+                .andExpect(jsonPath("$.balance.callbackFailureCost").exists())
+                .andExpect(jsonPath("$.balance.operatingProfit").exists())
+                .andExpect(jsonPath("$.balance.operatingMargin").exists())
+                .andExpect(jsonPath("$.balance.cashBalance").exists())
+                .andExpect(jsonPath("$.balance.settlementDelayRate").value(0.8182));
+
+        mvc.perform(get("/api/operations/summary"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.balance.transactionsProcessed").value(0))
+                .andExpect(jsonPath("$.balance.settlementBacklog").value(45))
+                .andExpect(jsonPath("$.balance.capacityUtilization").exists())
+                .andExpect(jsonPath("$.balance.negativeProfitStreak").value(1));
+    }
+
+    @Test
+    void balanceSnapshotPreservesSettlementCycleContext() throws Exception {
+        clearTablesForDeterministicReconciliation();
+        String cycleId = "CYCLE-BALANCE-" + nextId("CYCLE");
+        mvc.perform(post("/api/events/market").contentType(MediaType.APPLICATION_JSON).content(
+                        mapper.writeValueAsString(marketEvent("Archive-Market", logisticsEventId().replace("LG", "MK"),
+                                logisticsIdempotency().replace("LG", "MK"), "SALES_REVENUE_CONFIRMED", Map.of(
+                                        "orderId", "ORDER-BALANCE-" + nextId("ORD"),
+                                        "amount", 120_000L,
+                                        "currency", "KRW",
+                                        "settlementCycleId", cycleId,
+                                        "correlationId", "CORR-BALANCE-" + nextId("CORR")
+                                )))))
+                .andExpect(status().isOk());
+
+        mvc.perform(post("/api/workforce/workday/run").param("date", LocalDate.now().toString()))
+                .andExpect(status().isOk());
+
+        mvc.perform(get("/api/operations/summary"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.balance.settlementCycleId").value(cycleId));
+    }
+
+    @Test
+    void duplicateApprovalCallbackDoesNotReopenSettledOrReadyTransaction() throws Exception {
+        String eventId = logisticsEventId();
+        String idempotency = logisticsIdempotency();
+        mvc.perform(post("/api/events/logistics").contentType(MediaType.APPLICATION_JSON).content(
+                        mapper.writeValueAsString(logisticsEvent("Archive-Logistics", eventId, idempotency,
+                                "COLD_CHAIN_RISK_COST_CONFIRMED", Map.of(
+                                        "routePlanId", "ROUTE-" + nextId("LOG"),
+                                        "shipmentId", "SHIP-" + nextId("SHIP"),
+                                        "totalCost", 400_000L,
+                                        "riskScore", 0.91
+                                )))))
+                .andExpect(status().isOk());
+        String transactionId = transactionId(eventId);
+        String approvalRequestId = jdbc.queryForObject("select approval_request_id from finance_transaction where transaction_id=?", String.class, transactionId);
+        Map<String, Object> callback = Map.of(
+                "approvalRequestId", approvalRequestId,
+                "transactionId", transactionId,
+                "decision", "APPROVED",
+                "decidedBy", "synthetic-operator"
+        );
+
+        mvc.perform(post("/api/approvals/callback").contentType(MediaType.APPLICATION_JSON).content(mapper.writeValueAsString(callback)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("SETTLEMENT_READY"))
+                .andExpect(jsonPath("$.duplicate").value(false));
+        mvc.perform(post("/api/approvals/callback").contentType(MediaType.APPLICATION_JSON).content(mapper.writeValueAsString(callback)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("SETTLEMENT_READY"))
+                .andExpect(jsonPath("$.duplicate").value(true));
+        assertThat(transactionStatus(eventId)).isEqualTo("SETTLEMENT_READY");
+    }
+
+    @Test
     void nexusBulkStillWorks() throws Exception {
         List<Map<String, Object>> events = new ArrayList<>();
         for (int i = 0; i < 1000; i++) {
@@ -1284,6 +1422,7 @@ class LedgerApiTest {
     }
 
     private void clearTablesForDeterministicReconciliation() {
+        jdbc.execute("delete from ledger_runtime_balance_snapshot");
         jdbc.execute("delete from ledger_workforce_allocation");
         jdbc.execute("delete from workforce_workday_result");
         jdbc.execute("delete from workforce_allocation");

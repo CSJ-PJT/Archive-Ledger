@@ -46,6 +46,7 @@ archive:
     initial-delay: ${ARCHIVE_RUNTIME_INITIAL_DELAY:10s}
     max-events-per-tick: ${ARCHIVE_RUNTIME_MAX_EVENTS_PER_TICK:10}
     max-backlog-per-tick: ${ARCHIVE_RUNTIME_MAX_BACKLOG_PER_TICK:50}
+    callback-retry-limit: ${ARCHIVE_RUNTIME_CALLBACK_RETRY_LIMIT:3}
 
 server:
   port: 18080

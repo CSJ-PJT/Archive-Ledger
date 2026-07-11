@@ -10,6 +10,35 @@ Archive-Nexus direct 비용 이벤트, Archive-Logistics 물류비 확정 이벤
 
 > 모든 데이터는 Synthetic Data / Demo Data입니다. 실제 카드번호, 계좌번호, 개인정보, 실제 금융 데이터, 실제 배송/위치 데이터는 사용하지 않습니다.
 
+## Archive Runtime Mesh V1
+
+ArchiveOS Console V3는 Ledger의 runtime projection을 pull 방식으로 수집할 수 있습니다. 모든 조회 API는 read-only이며, 조회 호출이 거래 생성, 정산 실행, 대사 실행, callback 전송을 유발하지 않습니다.
+
+```text
+GET /api/runtime/status
+GET /api/runtime-events/recent?limit=100
+GET /api/runtime-events/recent?after={cursor}&limit=100
+GET /api/runtime-events/correlation/{correlationId}
+GET /api/runtime-events/entity/{entityId}
+GET /api/operations/summary
+GET /api/workforce/summary
+GET /api/productivity/summary
+GET /api/capacity/summary
+```
+
+`runtime-events/recent`는 각 이벤트에 재개 가능한 `cursor`를 포함합니다. ArchiveOS는 마지막 cursor를 보관하고 다음 폴링에서 `after`로 전달할 수 있습니다. 현재 Ledger는 검증된 ArchiveOS ingest 인증 계약이 아직 이 저장소에 없으므로, 임의 push 대신 pull 수집을 기본 경로로 유지합니다. 자세한 계약은 [archive-runtime-mesh-contract.md](docs/archive-runtime-mesh-contract.md)와 [archiveos-realtime-integration.md](docs/archiveos-realtime-integration.md)를 참고합니다.
+
+## Continuous Settlement Runtime
+
+Runtime tick은 이미 수신된 synthetic Market/Nexus/Logistics 이벤트의 정산 후속 업무를 제한된 처리량으로 진행합니다.
+
+- event receiver는 수신 시 `finance_transaction`, debit/credit `ledger_entry`, approval rule을 즉시 처리합니다.
+- tick은 `WORKDAY_COMPLETED` capacity 결과를 생성하고 `SETTLEMENT_OPERATOR` capacity 및 `max-backlog-per-tick` 범위에서만 `SETTLEMENT_READY` 거래를 정산합니다.
+- `APPROVAL_REQUIRED` 거래는 자동 승인하지 않습니다. `POST /api/approvals/callback`의 승인 결과가 `SETTLEMENT_READY`로 전이된 뒤에만 다음 tick의 정산 대상이 됩니다.
+- ArchiveOS approval integration이 enabled일 때만 실패한 approval dispatch를 제한 횟수 내에서 재시도합니다. Ledger 또는 ArchiveOS가 내려가도 transaction/ledger 처리 자체는 rollback하지 않습니다.
+
+`GET /api/settlement-agency/summary`와 `GET /api/operations/summary`의 `balance`는 transaction processing, settlement agency, reconciliation, approval review 수익과 workforce/backlog/callback 비용, synthetic cash balance, margin, delay rate, negative profit streak을 제공합니다. 자세한 계산 방식은 [continuous-settlement-runtime.md](docs/continuous-settlement-runtime.md)를 참고합니다.
+
 ## 핵심 역할
 
 - Archive-Nexus direct 비용 이벤트 수신
