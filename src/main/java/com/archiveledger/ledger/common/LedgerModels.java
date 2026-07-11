@@ -352,7 +352,9 @@ public final class LedgerModels {
     }
 
     public record SettlementBalanceSummary(
+            boolean available,
             String service,
+            String calculationScope,
             String settlementCycleId,
             BigDecimal transactionProcessingRevenue,
             BigDecimal settlementAgencyRevenue,

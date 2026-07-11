@@ -28,6 +28,9 @@ callback이 중복 수신되면 transaction의 현재 상태를 유지하고 `du
 - `settlementAgencyRevenue`
 - `reconciliationRevenue`
 - `approvalReviewRevenue`
+- `available`: workday snapshot이 존재하는지 여부
+- `calculationScope`: 현재 `WORKDAY`
+- `calculatedAt`: snapshot 계산 시각
 - `workforceCost`
 - `callbackFailureCost`
 - `operatingCost`

@@ -1240,6 +1240,8 @@ class LedgerApiTest {
 
         mvc.perform(get("/api/settlement-agency/summary"))
                 .andExpect(status().isOk())
+                .andExpect(jsonPath("$.balance.available").value(true))
+                .andExpect(jsonPath("$.balance.calculationScope").value("WORKDAY"))
                 .andExpect(jsonPath("$.balance.transactionProcessingRevenue").exists())
                 .andExpect(jsonPath("$.balance.settlementAgencyRevenue").exists())
                 .andExpect(jsonPath("$.balance.workforceCost").exists())
@@ -1251,6 +1253,8 @@ class LedgerApiTest {
 
         mvc.perform(get("/api/operations/summary"))
                 .andExpect(status().isOk())
+                .andExpect(jsonPath("$.balance.available").value(true))
+                .andExpect(jsonPath("$.balance.calculationScope").value("WORKDAY"))
                 .andExpect(jsonPath("$.balance.transactionsProcessed").value(0))
                 .andExpect(jsonPath("$.balance.settlementBacklog").value(45))
                 .andExpect(jsonPath("$.balance.capacityUtilization").exists())

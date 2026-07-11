@@ -845,7 +845,9 @@ public class LedgerService {
 
     private SettlementBalanceSummary settlementBalanceRow(java.sql.ResultSet rs, int row) throws java.sql.SQLException {
         return new SettlementBalanceSummary(
+                true,
                 TARGET_LEDGER,
+                "WORKDAY",
                 rs.getString("settlement_cycle_id"),
                 rs.getBigDecimal("transaction_processing_revenue"),
                 rs.getBigDecimal("settlement_agency_revenue"),
@@ -876,7 +878,9 @@ public class LedgerService {
                                                          BigDecimal utilization, BigDecimal cashBalance,
                                                          int negativeProfitStreak, Instant calculatedAt) {
         return new SettlementBalanceSummary(
+                result != null,
                 TARGET_LEDGER,
+                "WORKDAY",
                 settlementCycleId,
                 metrics.transactionRevenue(), metrics.settlementRevenue(), metrics.reconciliationRevenue(),
                 metrics.approvalRevenue(), metrics.payrollCost(), metrics.callbackFailureCost(), metrics.operatingCost(),
