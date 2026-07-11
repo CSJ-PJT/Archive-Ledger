@@ -178,6 +178,13 @@ main {
   margin-bottom: 14px;
 }
 
+.section-help {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 .flow-section {
   margin-bottom: 24px;
 }
