@@ -939,12 +939,16 @@ public class LedgerService {
 
         String source = value(request.source(), SOURCE_NEXUS);
         Map<String, Object> payload = request.payload();
-        String simulationRunId = text(payload == null ? null : payload.get("simulationRunId"));
-        String settlementCycleId = text(payload == null ? null : payload.get("settlementCycleId"));
-        String correlationId = text(payload == null ? null : payload.get("correlationId"));
-        String causationId = text(payload == null ? null : payload.get("causationId"));
-        int hopCount = parseInt(payload == null ? null : payload.get("hopCount"), 0);
-        int maxHop = parseInt(payload == null ? null : payload.get("maxHop"), Integer.MAX_VALUE);
+        String simulationRunId = firstText(request.simulationRunId(), text(payload == null ? null : payload.get("simulationRunId")));
+        String settlementCycleId = firstText(request.settlementCycleId(), text(payload == null ? null : payload.get("settlementCycleId")));
+        String correlationId = firstText(request.correlationId(), text(payload == null ? null : payload.get("correlationId")));
+        String causationId = firstText(request.causationId(), text(payload == null ? null : payload.get("causationId")));
+        int hopCount = request.hopCount() == null
+                ? parseInt(payload == null ? null : payload.get("hopCount"), 0)
+                : request.hopCount();
+        int maxHop = request.maxHop() == null
+                ? parseInt(payload == null ? null : payload.get("maxHop"), Integer.MAX_VALUE)
+                : request.maxHop();
 
         if (exists("select count(*) from received_event where event_id=? or idempotency_key=?", request.eventId(), request.idempotencyKey())) {
             metrics.duplicateEvent();
@@ -1010,8 +1014,9 @@ public class LedgerService {
                     insert into finance_transaction(
                         transaction_id,source_event_id,idempotency_key,source_service,transaction_type,
                         factory_id,vendor_id,route_plan_id,shipment_id,origin_code,destination_code,risk_score,approval_reason,
-                        synthetic_account_id,amount,currency,status,approval_required,approval_request_id,reason,occurred_at,created_at,updated_at
-                    ) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        synthetic_account_id,amount,currency,status,approval_required,approval_request_id,reason,occurred_at,created_at,updated_at,
+                        simulation_run_id,settlement_cycle_id,correlation_id,causation_id
+                    ) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     transactionId,
                     request.eventId(),
@@ -1035,17 +1040,23 @@ public class LedgerService {
                     normalized.reason(),
                     ts(normalized.occurredAt()),
                     ts(receivedAt),
-                    ts(receivedAt)
+                    ts(receivedAt),
+                    simulationRunId,
+                    settlementCycleId,
+                    correlationId,
+                    causationId
             );
             metrics.transactionCreated();
 
-            createLedgerEntries(transactionId, normalized, receivedAt);
+            createLedgerEntries(transactionId, normalized, receivedAt, correlationId);
             if (normalized.approvalRequired()) {
                 metrics.approvalRequired();
                 String evidence = fallbackEvidence(normalized);
                 jdbc.update("""
-                        insert into approval_request(approval_request_id,transaction_id,requested_to,status,amount,reason,policy_evidence,requested_at)
-                        values(?,?,?,?,?,?,?,?)
+                        insert into approval_request(
+                            approval_request_id,transaction_id,requested_to,status,amount,reason,policy_evidence,requested_at,
+                            correlation_id,causation_id,settlement_cycle_id
+                        ) values(?,?,?,?,?,?,?,?,?,?,?)
                         """,
                         approvalRequestId,
                         transactionId,
@@ -1054,7 +1065,10 @@ public class LedgerService {
                         normalized.amount(),
                         normalized.reason(),
                         evidence,
-                        ts(receivedAt)
+                        ts(receivedAt),
+                        correlationId,
+                        runtimeTransactionEventId(transactionId),
+                        settlementCycleId
                 );
 
                 try {
@@ -1229,12 +1243,16 @@ public class LedgerService {
             for (TransactionView tx : candidates) {
                 total = total.add(tx.amount());
                 jdbc.update("""
-                        insert into settlement_detail(batch_id,transaction_id,factory_id,vendor_id,account_code,amount,status,created_at)
-                        values(?,?,?,?,?,?,?,?)
+                        insert into settlement_detail(
+                            batch_id,transaction_id,factory_id,vendor_id,account_code,amount,status,created_at,
+                            correlation_id,causation_id,simulation_run_id,settlement_cycle_id
+                        ) values(?,?,?,?,?,?,?,?,?,?,?,?)
                         """,
                         batchId, tx.transactionId(), tx.factoryId(), tx.vendorId(),
                         settlementAccount(tx.transactionType()),
-                        tx.amount(), "SETTLED", ts(Instant.now()));
+                        tx.amount(), "SETTLED", ts(Instant.now()),
+                        tx.correlationId(), runtimeSettlementReadyEventId(tx.transactionId()),
+                        tx.simulationRunId(), tx.settlementCycleId());
                 jdbc.update("update finance_transaction set status='SETTLED', updated_at=? where transaction_id=?", ts(Instant.now()), tx.transactionId());
                 audit(tx.transactionId(), "Archive-Ledger", "TRANSACTION_SETTLED", "finance_transaction", tx.transactionId(),
                         "SETTLEMENT_READY", "SETTLED", Map.of("batchId", batchId));
@@ -1503,9 +1521,11 @@ public class LedgerService {
         events.addAll(runtimeLedgerEntryEvents(limit, correlationId, entityId));
         events.addAll(runtimeApprovalEvents(limit, correlationId, entityId));
         events.addAll(runtimeSettlementEvents(limit, correlationId, entityId));
-        events.addAll(runtimeReconciliationEvents(limit));
-        events.addAll(runtimeCallbackEvents(limit, entityId));
-        events.addAll(runtimeWorkforceEvents(limit, entityId));
+        events.addAll(runtimeReconciliationEvents(limit, correlationId, entityId));
+        events.addAll(runtimeCallbackEvents(limit, correlationId, entityId));
+        if (correlationId == null || correlationId.isBlank()) {
+            events.addAll(runtimeWorkforceEvents(limit, entityId));
+        }
         return events.stream()
                 .sorted(Comparator.comparing(RuntimeEventView::occurredAt, Comparator.nullsLast(Comparator.naturalOrder())).reversed())
                 .map(this::withRuntimeCursor)
@@ -1549,7 +1569,7 @@ public class LedgerService {
             String status = rs.getString("status");
             if ("APPROVAL_REQUIRED".equals(status)) {
                 projected.add(transactionProjection(rs, "APPROVAL_REQUIRED", "approval_required", "warning", "승인 대기 거래"));
-            } else if ("SETTLEMENT_READY".equals(status)) {
+            } else if ("SETTLEMENT_READY".equals(status) || "SETTLED".equals(status)) {
                 projected.add(transactionProjection(rs, "SETTLEMENT_READY", "waiting", "info", "정산 대기 거래"));
             }
             return projected;
@@ -1594,7 +1614,7 @@ public class LedgerService {
                     "transaction",
                     rs.getString("transaction_id"),
                     rs.getString("correlation_id"),
-                    rs.getString("causation_id"),
+                    runtimeTransactionEventId(rs.getString("transaction_id")),
                     "completed",
                     "normal",
                     "복식 원장 entry " + rs.getInt("entry_count") + "건 생성",
@@ -1606,7 +1626,9 @@ public class LedgerService {
 
     private List<RuntimeEventView> runtimeApprovalEvents(int limit, String correlationId, String entityId) {
         StringBuilder sql = new StringBuilder("""
-                select ar.*, ft.source_service, ft.source_event_id, ft.transaction_type,
+                select ar.*, ar.correlation_id as approval_correlation_id, ar.causation_id as approval_causation_id,
+                       ar.settlement_cycle_id as approval_settlement_cycle_id,
+                       ft.source_service, ft.source_event_id, ft.transaction_type,
                        re.correlation_id, re.causation_id, re.simulation_run_id, re.settlement_cycle_id,
                        re.hop_count, re.max_hop, re.payload
                 from approval_request ar
@@ -1636,7 +1658,8 @@ public class LedgerService {
             metadata.put("transactionId", rs.getString("transaction_id"));
             metadata.put("transactionType", rs.getString("transaction_type"));
             putIfPresent(metadata, "simulationRunId", rs.getString("simulation_run_id"));
-            putIfPresent(metadata, "settlementCycleId", rs.getString("settlement_cycle_id"));
+            putIfPresent(metadata, "settlementCycleId", firstText(
+                    rs.getString("approval_settlement_cycle_id"), rs.getString("settlement_cycle_id")));
             putIfPresent(metadata, "hopCount", rs.getObject("hop_count"));
             putIfPresent(metadata, "maxHop", rs.getObject("max_hop"));
             copySyntheticPayload(metadata, readPayload(rs.getString("payload")), "workdayId");
@@ -1644,15 +1667,23 @@ public class LedgerService {
             if (occurredAt == null) {
                 occurredAt = instant(rs.getTimestamp("requested_at"));
             }
+            String approvalRequestId = rs.getString("approval_request_id");
+            String runtimeEventId = switch (eventType) {
+                case "APPROVAL_APPROVED" -> "rt-approval-approved-" + approvalRequestId;
+                case "APPROVAL_REJECTED" -> "rt-approval-rejected-" + approvalRequestId;
+                default -> runtimeApprovalRequiredEventId(approvalRequestId);
+            };
             return runtimeView(
-                    "rt-approval-" + rs.getString("approval_request_id"),
+                    runtimeEventId,
                     value(rs.getString("source_service"), TARGET_LEDGER),
                     "approval",
                     eventType,
                     "approval",
-                    rs.getString("approval_request_id"),
-                    rs.getString("correlation_id"),
-                    rs.getString("causation_id"),
+                    approvalRequestId,
+                    firstText(rs.getString("approval_correlation_id"), rs.getString("correlation_id")),
+                    "APPROVAL_REQUIRED".equals(eventType)
+                            ? runtimeTransactionEventId(rs.getString("transaction_id"))
+                            : runtimeApprovalRequiredEventId(approvalRequestId),
                     status,
                     severity,
                     approvalDisplayLabel(eventType),
@@ -1663,51 +1694,70 @@ public class LedgerService {
     }
 
     private List<RuntimeEventView> runtimeSettlementEvents(int limit, String correlationId, String entityId) {
-        if (correlationId != null && !correlationId.isBlank()) {
-            return List.of();
-        }
-        StringBuilder sql = new StringBuilder("select * from settlement_batch where status in ('RUNNING','SUCCESS','FAILED')");
+        StringBuilder sql = new StringBuilder("""
+                select sd.*, sb.status as batch_status, sb.settlement_date, sb.started_at, sb.completed_at,
+                       ft.source_service, ft.correlation_id as transaction_correlation_id,
+                       ft.simulation_run_id as transaction_simulation_run_id,
+                       ft.settlement_cycle_id as transaction_settlement_cycle_id
+                from settlement_detail sd
+                join settlement_batch sb on sb.batch_id=sd.batch_id
+                join finance_transaction ft on ft.transaction_id=sd.transaction_id
+                where sb.status in ('RUNNING','SUCCESS','FAILED')
+                """);
         List<Object> args = new ArrayList<>();
+        if (correlationId != null && !correlationId.isBlank()) {
+            sql.append(" and coalesce(sd.correlation_id, ft.correlation_id)=?");
+            args.add(correlationId);
+        }
         if (entityId != null && !entityId.isBlank()) {
-            sql.append(" and batch_id=?");
+            sql.append(" and (sd.batch_id=? or sd.transaction_id=?)");
+            args.add(entityId);
             args.add(entityId);
         }
-        sql.append(" order by completed_at desc limit ?");
+        sql.append(" order by coalesce(sb.completed_at, sb.started_at) desc, sd.id desc limit ?");
         args.add(limit);
         return jdbc.query(sql.toString(), (rs, row) -> {
             List<RuntimeEventView> projected = new ArrayList<>();
-            Map<String, Object> metadata = maskedAmountMetadata(rs.getBigDecimal("total_amount"));
-            metadata.put("batchId", rs.getString("batch_id"));
+            String transactionId = rs.getString("transaction_id");
+            String batchId = rs.getString("batch_id");
+            String startedEventId = "rt-settlement-started-" + batchId + "-" + transactionId;
+            Map<String, Object> metadata = maskedAmountMetadata(rs.getBigDecimal("amount"));
+            metadata.put("batchId", batchId);
             metadata.put("settlementDate", rs.getDate("settlement_date").toString());
-            metadata.put("transactionCount", rs.getInt("total_transaction_count"));
+            metadata.put("transactionId", transactionId);
+            putIfPresent(metadata, "simulationRunId", firstText(
+                    rs.getString("simulation_run_id"), rs.getString("transaction_simulation_run_id")));
+            putIfPresent(metadata, "settlementCycleId", firstText(
+                    rs.getString("settlement_cycle_id"), rs.getString("transaction_settlement_cycle_id")));
+            String detailCorrelationId = firstText(rs.getString("correlation_id"), rs.getString("transaction_correlation_id"));
             projected.add(runtimeView(
-                    "rt-settlement-started-" + rs.getString("batch_id"),
+                    startedEventId,
                     TARGET_LEDGER,
                     "settlement",
                     "SETTLEMENT_STARTED",
-                    "settlement_batch",
-                    rs.getString("batch_id"),
-                    null,
-                    null,
+                    "transaction",
+                    transactionId,
+                    detailCorrelationId,
+                    runtimeSettlementReadyEventId(transactionId),
                     "processing",
                     "info",
-                    "일 정산 시작",
+                    "거래 정산 시작",
                     instant(rs.getTimestamp("started_at")),
                     metadata
             ));
-            if ("SUCCESS".equals(rs.getString("status"))) {
+            if ("SUCCESS".equals(rs.getString("batch_status"))) {
                 projected.add(runtimeView(
-                        "rt-settlement-completed-" + rs.getString("batch_id"),
+                        "rt-settlement-completed-" + batchId + "-" + transactionId,
                         TARGET_LEDGER,
                         "settlement",
                         "SETTLEMENT_COMPLETED",
-                        "settlement_batch",
-                        rs.getString("batch_id"),
-                        null,
-                        null,
+                        "transaction",
+                        transactionId,
+                        detailCorrelationId,
+                        startedEventId,
                         "settled",
                         "normal",
-                        "일 정산 완료 " + rs.getInt("total_transaction_count") + "건",
+                        "거래 정산 완료",
                         instant(rs.getTimestamp("completed_at")),
                         metadata
                 ));
@@ -1716,7 +1766,34 @@ public class LedgerService {
         }, args.toArray()).stream().flatMap(List::stream).toList();
     }
 
-    private List<RuntimeEventView> runtimeReconciliationEvents(int limit) {
+    private List<RuntimeEventView> runtimeReconciliationEvents(int limit, String correlationId, String entityId) {
+        if (correlationId != null && !correlationId.isBlank()) {
+            return jdbc.query("""
+                    select sd.batch_id, sd.transaction_id, coalesce(sd.correlation_id, ft.correlation_id) as correlation_id,
+                           sb.settlement_date, sb.completed_at, rr.id as reconciliation_id, rr.mismatch_count, rr.status
+                    from settlement_detail sd
+                    join finance_transaction ft on ft.transaction_id=sd.transaction_id
+                    join settlement_batch sb on sb.batch_id=sd.batch_id
+                    join reconciliation_result rr on rr.reconciliation_date=sb.settlement_date
+                    where coalesce(sd.correlation_id, ft.correlation_id)=?
+                    order by rr.created_at desc, sd.id desc limit ?
+                    """, (rs, row) -> runtimeView(
+                    "rt-reconciliation-" + rs.getLong("reconciliation_id") + "-" + rs.getString("transaction_id"),
+                    TARGET_LEDGER,
+                    "reconciliation",
+                    rs.getInt("mismatch_count") == 0 ? "RECONCILIATION_OK" : "RECONCILIATION_WARNING",
+                    "transaction",
+                    rs.getString("transaction_id"),
+                    rs.getString("correlation_id"),
+                    "rt-settlement-completed-" + rs.getString("batch_id") + "-" + rs.getString("transaction_id"),
+                    rs.getInt("mismatch_count") == 0 ? "completed" : "delayed",
+                    rs.getInt("mismatch_count") == 0 ? "normal" : "warning",
+                    rs.getInt("mismatch_count") == 0 ? "거래 대사 정상" : "거래 대사 경고",
+                    instant(rs.getTimestamp("completed_at")),
+                    Map.of("mismatch", rs.getInt("mismatch_count"), "status", rs.getString("status"),
+                            "settlementDate", rs.getDate("settlement_date").toString())
+            ), correlationId, limit);
+        }
         return jdbc.query("""
                 select * from reconciliation_result order by created_at desc limit ?
                 """, (rs, row) -> runtimeView(
@@ -1736,12 +1813,21 @@ public class LedgerService {
         ), limit);
     }
 
-    private List<RuntimeEventView> runtimeCallbackEvents(int limit, String entityId) {
+    private List<RuntimeEventView> runtimeCallbackEvents(int limit, String correlationId, String entityId) {
         StringBuilder sql = new StringBuilder("""
-                select * from audit_log
-                where action in ('ARCHIVEOS_APPROVAL_REQUESTED','ARCHIVEOS_APPROVAL_DEGRADED','APPROVAL_CALLBACK')
+                select al.*, ft.correlation_id, ft.settlement_cycle_id, ft.simulation_run_id, ft.source_event_id,
+                       coalesce(ft.transaction_id, ar.transaction_id) as runtime_transaction_id,
+                       coalesce(ft.approval_request_id, ar.approval_request_id) as runtime_approval_request_id
+                from audit_log al
+                left join approval_request ar on ar.approval_request_id=al.target_id
+                left join finance_transaction ft on ft.transaction_id=al.target_id or ft.transaction_id=ar.transaction_id
+                where al.action in ('ARCHIVEOS_APPROVAL_REQUESTED','ARCHIVEOS_APPROVAL_DEGRADED','APPROVAL_CALLBACK')
                 """);
         List<Object> args = new ArrayList<>();
+        if (correlationId != null && !correlationId.isBlank()) {
+            sql.append(" and ft.correlation_id=?");
+            args.add(correlationId);
+        }
         if (entityId != null && !entityId.isBlank()) {
             sql.append(" and (target_id=? or trace_id=?)");
             args.add(entityId);
@@ -1751,26 +1837,32 @@ public class LedgerService {
         args.add(limit);
         return jdbc.query(sql.toString(), (rs, row) -> {
             String action = rs.getString("action");
-            String eventType = "ARCHIVEOS_APPROVAL_DEGRADED".equals(action) ? "CALLBACK_FAILED" : "CALLBACK_SENT";
-            if ("APPROVAL_CALLBACK".equals(action)) {
-                eventType = "APPROVED".equals(rs.getString("after_status")) || "SETTLEMENT_READY".equals(rs.getString("after_status"))
-                        ? "APPROVAL_APPROVED" : "APPROVAL_REJECTED";
-            }
+            String eventType = "ARCHIVEOS_APPROVAL_DEGRADED".equals(action) ? "CALLBACK_FAILED" : "CALLBACK_COMPLETED";
             String status = "CALLBACK_FAILED".equals(eventType) ? "failed" : "completed";
+            String transactionId = rs.getString("runtime_transaction_id");
+            String directCause = "APPROVAL_CALLBACK".equals(action)
+                    ? runtimeApprovalRequiredEventId(rs.getString("runtime_approval_request_id"))
+                    : rs.getString("source_event_id");
+            Map<String, Object> metadata = new HashMap<>();
+            metadata.put("action", action);
+            metadata.put("beforeStatus", value(rs.getString("before_status"), ""));
+            metadata.put("afterStatus", value(rs.getString("after_status"), ""));
+            putIfPresent(metadata, "settlementCycleId", rs.getString("settlement_cycle_id"));
+            putIfPresent(metadata, "simulationRunId", rs.getString("simulation_run_id"));
             return runtimeView(
                     "rt-callback-" + rs.getLong("id"),
                     TARGET_LEDGER,
                     "approval",
                     eventType,
                     rs.getString("target_type"),
-                    rs.getString("target_id"),
-                    null,
-                    null,
+                    firstText(transactionId, rs.getString("target_id")),
+                    rs.getString("correlation_id"),
+                    directCause,
                     status,
                     "failed".equals(status) ? "warning" : "normal",
                     "CALLBACK_FAILED".equals(eventType) ? "ArchiveOS callback 실패" : "ArchiveOS callback 전송",
                     instant(rs.getTimestamp("created_at")),
-                    Map.of("action", action, "beforeStatus", value(rs.getString("before_status"), ""), "afterStatus", value(rs.getString("after_status"), ""))
+                    metadata
             );
         }, args.toArray());
     }
@@ -1872,7 +1964,10 @@ public class LedgerService {
                         rs.getString("account_code"),
                         rs.getBigDecimal("amount"),
                         rs.getString("status"),
-                        instant(rs.getTimestamp("created_at"))
+                        instant(rs.getTimestamp("created_at")),
+                        rs.getString("settlement_cycle_id"),
+                        rs.getString("correlation_id"),
+                        rs.getString("causation_id")
                 ), batchId);
     }
 
@@ -2287,22 +2382,26 @@ public class LedgerService {
         );
     }
 
-    private void createLedgerEntries(String transactionId, Normalized normalized, Instant createdAt) {
+    private void createLedgerEntries(String transactionId, Normalized normalized, Instant createdAt,
+                                     String correlationId) {
         Account debit = debitAccount(normalized.transactionType());
         Account credit = creditAccount(normalized.transactionType());
-        insertLedger(transactionId, debit.code(), debit.name(), normalized.amount(), BigDecimal.ZERO, normalized, createdAt);
-        insertLedger(transactionId, credit.code(), credit.name(), BigDecimal.ZERO, normalized.amount(), normalized, createdAt);
+        String directCause = runtimeTransactionEventId(transactionId);
+        insertLedger(transactionId, debit.code(), debit.name(), normalized.amount(), BigDecimal.ZERO, normalized, createdAt,
+                correlationId, directCause);
+        insertLedger(transactionId, credit.code(), credit.name(), BigDecimal.ZERO, normalized.amount(), normalized, createdAt,
+                correlationId, directCause);
     }
 
     private void insertLedger(String transactionId, String accountCode, String accountName, BigDecimal debit, BigDecimal credit,
-                             Normalized normalized, Instant createdAt) {
+                             Normalized normalized, Instant createdAt, String correlationId, String causationId) {
         jdbc.update("""
                 insert into ledger_entry(transaction_id,account_code,account_name,debit_amount,credit_amount,factory_id,vendor_id,
-                                         occurred_at,created_at,source_service)
-                values(?,?,?,?,?,?,?,?,?,?)
+                                         occurred_at,created_at,source_service,correlation_id,causation_id)
+                values(?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 transactionId, accountCode, accountName, debit, credit, normalized.factoryId(), normalized.vendorId(),
-                ts(normalized.occurredAt()), ts(createdAt), normalized.sourceService());
+                ts(normalized.occurredAt()), ts(createdAt), normalized.sourceService(), correlationId, causationId);
     }
 
     private Account debitAccount(String type) {
@@ -2457,15 +2556,30 @@ public class LedgerService {
         putIfPresent(metadata, "maxHop", rs.getObject("max_hop"));
         copySyntheticPayload(metadata, payload, "workdayId", "orderId", "paymentId", "returnId", "claimId", "customerType", "priority");
         String sourceService = value(rs.getString("source_service"), rs.getString("event_source_service"));
+        String transactionId = rs.getString("transaction_id");
+        String approvalRequestId = rs.getString("approval_request_id");
+        String runtimeEventId = switch (eventType) {
+            case "TRANSACTION_CREATED" -> runtimeTransactionEventId(transactionId);
+            case "SETTLEMENT_READY" -> runtimeSettlementReadyEventId(transactionId);
+            case "APPROVAL_REQUIRED" -> runtimeApprovalRequiredEventId(approvalRequestId);
+            default -> "rt-transaction-" + eventType.toLowerCase(Locale.ROOT) + "-" + transactionId;
+        };
+        String directCause = switch (eventType) {
+            case "TRANSACTION_CREATED" -> rs.getString("source_event_id");
+            case "SETTLEMENT_READY" -> approvalRequestId == null
+                    ? runtimeTransactionEventId(transactionId)
+                    : "rt-approval-approved-" + approvalRequestId;
+            default -> runtimeTransactionEventId(transactionId);
+        };
         return runtimeView(
-                "rt-transaction-" + eventType + "-" + rs.getString("transaction_id"),
+                runtimeEventId,
                 sourceService,
                 "ledger",
                 eventType,
                 "transaction",
-                rs.getString("transaction_id"),
+                transactionId,
                 rs.getString("correlation_id"),
-                rs.getString("causation_id"),
+                directCause,
                 status,
                 severity,
                 transactionDisplayLabel(eventType, labelPrefix),
@@ -2682,6 +2796,18 @@ public class LedgerService {
         return labelPrefix + " 1건";
     }
 
+    private String runtimeTransactionEventId(String transactionId) {
+        return "rt-transaction-created-" + transactionId;
+    }
+
+    private String runtimeSettlementReadyEventId(String transactionId) {
+        return "rt-settlement-ready-" + transactionId;
+    }
+
+    private String runtimeApprovalRequiredEventId(String approvalRequestId) {
+        return "rt-approval-required-" + approvalRequestId;
+    }
+
     private String approvalDisplayLabel(String eventType) {
         return switch (eventType) {
             case "APPROVAL_APPROVED" -> "승인 완료 거래 1건";
@@ -2717,10 +2843,14 @@ public class LedgerService {
                 rs.getString("status"),
                 rs.getBoolean("approval_required"),
                 rs.getString("approval_request_id"),
-                rs.getString("reason"),
-                instant(rs.getTimestamp("occurred_at")),
-                instant(rs.getTimestamp("created_at")),
-                instant(rs.getTimestamp("updated_at"))
+                        rs.getString("reason"),
+                        instant(rs.getTimestamp("occurred_at")),
+                        instant(rs.getTimestamp("created_at")),
+                        instant(rs.getTimestamp("updated_at")),
+                        rs.getString("simulation_run_id"),
+                        rs.getString("settlement_cycle_id"),
+                        rs.getString("correlation_id"),
+                        rs.getString("causation_id")
         );
     }
 
@@ -2734,7 +2864,9 @@ public class LedgerService {
                 rs.getString("factory_id"),
                 rs.getString("vendor_id"),
                 instant(rs.getTimestamp("occurred_at")),
-                instant(rs.getTimestamp("created_at"))
+                instant(rs.getTimestamp("created_at")),
+                rs.getString("correlation_id"),
+                rs.getString("causation_id")
         );
     }
 
@@ -3154,7 +3286,13 @@ public class LedgerService {
                 source,
                 request.schemaVersion(),
                 request.payload(),
-                request.occurredAt()
+                request.occurredAt(),
+                request.simulationRunId(),
+                request.settlementCycleId(),
+                request.correlationId(),
+                request.causationId(),
+                request.hopCount(),
+                request.maxHop()
         );
     }
 

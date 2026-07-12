@@ -417,6 +417,7 @@ class LedgerApiTest {
     void approvalCallbackApprovedMovesToSettlementReady() throws Exception {
         String eventId = logisticsEventId();
         String idempotency = logisticsIdempotency();
+        String correlationId = "CORR-APPROVAL-CALLBACK-" + nextId("CORR");
         mvc.perform(post("/api/events/logistics").contentType(MediaType.APPLICATION_JSON).content(
                         mapper.writeValueAsString(logisticsEvent("Archive-Logitics", eventId, idempotency, "COLD_CHAIN_RISK_COST_CONFIRMED", Map.of(
                                 "routePlanId", "ROUTE-" + nextId("LOG"),
@@ -424,7 +425,8 @@ class LedgerApiTest {
                                 "factoryId", "FAC-C",
                                 "originCode", "FAC-C",
                                 "destinationCode", "DC-SEOUL-01",
-                                "totalCost", 2_000L
+                                "totalCost", 2_000L,
+                                "correlationId", correlationId
                         )))))
                 .andExpect(status().isOk());
 
@@ -441,6 +443,11 @@ class LedgerApiTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("SETTLEMENT_READY"));
         assertThat(jdbc.queryForObject("select status from finance_transaction where transaction_id=?", String.class, tx)).isEqualTo("SETTLEMENT_READY");
+        mvc.perform(get("/api/runtime-events/correlation/{correlationId}", correlationId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[*].correlationId", Matchers.everyItem(Matchers.is(correlationId))))
+                .andExpect(jsonPath("$[*].eventType", Matchers.hasItems(
+                        "APPROVAL_APPROVED", "SETTLEMENT_READY", "CALLBACK_COMPLETED")));
     }
 
     @Test
@@ -845,6 +852,53 @@ class LedgerApiTest {
         mvc.perform(get("/api/runtime-events/recent").param("limit", "100"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$[*].eventType", Matchers.hasItems("RECONCILIATION_OK", "WORKDAY_COMPLETED")));
+    }
+
+    @Test
+    void correlationIdIsPreservedAcrossTransactionLedgerSettlementAndReconciliation() throws Exception {
+        clearTablesForDeterministicReconciliation();
+        LocalDate workDate = LocalDate.now();
+        String eventId = logisticsEventId().replace("LG", "MK");
+        String idempotency = logisticsIdempotency().replace("LG", "MK");
+        String correlationId = "CORR-SETTLEMENT-" + nextId("CORR");
+        String cycleId = "CYCLE-SETTLEMENT-" + nextId("CYCLE");
+
+        Map<String, Object> request = marketEvent("Archive-Market", eventId, idempotency,
+                "SALES_REVENUE_CONFIRMED", Map.of(
+                        "orderId", "ORDER-" + nextId("ORD"),
+                        "amount", 120_000L,
+                        "currency", "KRW"
+                ));
+        request.put("correlationId", correlationId);
+        request.put("causationId", "MARKET-ORDER-" + nextId("CAUSE"));
+        request.put("settlementCycleId", cycleId);
+
+        mvc.perform(post("/api/events/market").contentType(MediaType.APPLICATION_JSON).content(
+                        mapper.writeValueAsString(request)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.duplicate").value(false));
+
+        String transactionId = transactionId(eventId);
+        assertThat(jdbc.queryForObject("select correlation_id from finance_transaction where transaction_id=?", String.class, transactionId))
+                .isEqualTo(correlationId);
+        assertThat(jdbc.queryForObject("select count(*) from ledger_entry where transaction_id=? and correlation_id=?", Integer.class,
+                transactionId, correlationId)).isEqualTo(2);
+        assertThat(sum("sum(debit_amount)", transactionId)).isEqualByComparingTo(sum("sum(credit_amount)", transactionId));
+
+        mvc.perform(post("/api/settlements/daily/run").param("date", workDate.toString()))
+                .andExpect(status().isOk());
+        mvc.perform(post("/api/reconciliation/daily").param("date", workDate.toString()))
+                .andExpect(status().isOk());
+
+        assertThat(jdbc.queryForObject("select correlation_id from settlement_detail where transaction_id=?", String.class, transactionId))
+                .isEqualTo(correlationId);
+        mvc.perform(get("/api/runtime-events/correlation/{correlationId}", correlationId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[*].correlationId", Matchers.everyItem(Matchers.is(correlationId))))
+                .andExpect(jsonPath("$[*].eventType", Matchers.hasItems(
+                        "TRANSACTION_CREATED", "LEDGER_ENTRY_CREATED", "SETTLEMENT_READY",
+                        "SETTLEMENT_STARTED", "SETTLEMENT_COMPLETED", "RECONCILIATION_OK")))
+                .andExpect(jsonPath("$[*].settlementCycleId", Matchers.hasItem(cycleId)));
     }
 
     @Test

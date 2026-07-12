@@ -22,7 +22,13 @@ public final class LedgerModels {
             String source,
             Integer schemaVersion,
             @NotNull Map<String, Object> payload,
-            Instant occurredAt
+            Instant occurredAt,
+            String simulationRunId,
+            String settlementCycleId,
+            String correlationId,
+            String causationId,
+            Integer hopCount,
+            Integer maxHop
     ) {
     }
 
@@ -58,12 +64,15 @@ public final class LedgerModels {
                                   String transactionType, String factoryId, String vendorId,
                                   String syntheticAccountId, BigDecimal amount, String currency, String status,
                                   boolean approvalRequired, String approvalRequestId, String reason,
-                                  Instant occurredAt, Instant createdAt, Instant updatedAt) {
+                                  Instant occurredAt, Instant createdAt, Instant updatedAt,
+                                  String simulationRunId, String settlementCycleId,
+                                  String correlationId, String causationId) {
     }
 
     public record LedgerEntryView(String transactionId, String accountCode, String accountName,
                                   BigDecimal debitAmount, BigDecimal creditAmount, String factoryId,
-                                  String vendorId, Instant occurredAt, Instant createdAt) {
+                                  String vendorId, Instant occurredAt, Instant createdAt,
+                                  String correlationId, String causationId) {
     }
 
     public record LedgerSummary(String scope, BigDecimal totalDebit, BigDecimal totalCredit, long entryCount) {
@@ -100,7 +109,8 @@ public final class LedgerModels {
     }
 
     public record SettlementDetailView(String batchId, String transactionId, String factoryId, String vendorId,
-                                       String accountCode, BigDecimal amount, String status, Instant createdAt) {
+                                       String accountCode, BigDecimal amount, String status, Instant createdAt,
+                                       String settlementCycleId, String correlationId, String causationId) {
     }
 
     public record DailyBatchRunView(String runId, LocalDate batchDate, String status, String approvedBy,
