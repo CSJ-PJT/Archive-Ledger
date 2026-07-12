@@ -36,6 +36,11 @@ function formatDateTime(value) {
   return i18n ? i18n.formatDateTime(value) : new Date(value).toLocaleString("ko-KR");
 }
 
+function formatPercent(value) {
+  const ratio = Number(value ?? 0);
+  return `${(ratio * 100).toLocaleString(i18n?.getLocale?.() ?? "ko-KR", { maximumFractionDigits: 2 })}%`;
+}
+
 async function getJson(path) {
   const response = await fetch(path, { headers: { Accept: "application/json" } });
   if (!response.ok) {
@@ -63,6 +68,36 @@ function setStatus(id, value) {
   } else {
     element.classList.add("danger");
   }
+}
+
+function setSignedMoney(id, value) {
+  const element = byId(id);
+  if (!element) return;
+  const amount = Number(value ?? 0);
+  element.textContent = formatMoney(amount);
+  element.classList.toggle("balanced", amount > 0);
+  element.classList.toggle("danger", amount < 0);
+}
+
+function renderRuntimeOverview(runtime, balance, capacity) {
+  const available = balance?.available;
+  setText("runtimePipeline", runtime?.pipelineStatus ?? "-");
+  setText("runtimeLastWork", runtime?.lastWorkAt ? formatDateTime(runtime.lastWorkAt) : translate("runtime.noData"));
+  setText("runtimeScope", balance?.calculationScope ?? "-");
+  setText("runtimeCalculatedAt", balance?.calculatedAt ? formatDateTime(balance.calculatedAt) : translate("runtime.noData"));
+  setSignedMoney("operatingProfit", balance?.operatingProfit);
+  setText("cashBalance", formatMoney(balance?.cashBalance));
+  setText("operatingMargin", `${translate("runtime.margin")} ${formatPercent(balance?.operatingMargin)}`);
+  setText("capacityUtilization", formatPercent(balance?.capacityUtilization ?? capacity?.capacityUtilizationRate));
+  setText("capacityAvailable", available === false ? translate("runtime.noData") : translate("runtime.available"));
+  setText("settlementDelayRate", formatPercent(balance?.settlementDelayRate));
+  setText("bottleneckRole", balance?.bottleneckRole ?? capacity?.bottleneckRole ?? "NONE");
+  setText("runtimeBacklog", translate("runtime.backlogDetail", {
+    approval: formatNumber(balance?.approvalBacklog),
+    settlement: formatNumber(balance?.settlementBacklog),
+    reconciliation: formatNumber(balance?.reconciliationBacklog),
+    callback: formatNumber(balance?.callbackBacklog)
+  }));
 }
 
 function renderBalance(id, summary) {
@@ -108,14 +143,20 @@ async function refreshDashboard() {
     reconciliation,
     logisticsLedger,
     nexusLedger,
-    transactions
+    transactions,
+    runtime,
+    settlementAgency,
+    capacity
   ] = await Promise.all([
     getJson("/actuator/health"),
     getJson("/api/operations/summary"),
     getJson("/api/reconciliation/summary"),
     getJson(`/api/ledger/summary?source=${encodeURIComponent(sourceLogistics)}`),
     getJson(`/api/ledger/summary?source=${encodeURIComponent(sourceNexus)}`),
-    getJson("/api/transactions")
+    getJson("/api/transactions"),
+    getJson("/api/runtime/status"),
+    getJson("/api/settlement-agency/summary"),
+    getJson("/api/capacity/summary")
   ]);
 
   setStatus("serviceStatus", operations.status ?? health.status ?? "UNKNOWN");
@@ -139,6 +180,7 @@ async function refreshDashboard() {
   const nexusBalanced = renderBalance("nexusDebitCredit", nexusLedger);
   setStatus("ledgerBalance", logisticsBalanced && nexusBalanced ? "BALANCED" : "CHECK");
 
+  renderRuntimeOverview(runtime, settlementAgency.balance ?? operations.balance, capacity);
   renderTransactions(transactions);
   setText("lastUpdated", translate("common.updatedAt", { time: formatDateTime(new Date()) }));
 }

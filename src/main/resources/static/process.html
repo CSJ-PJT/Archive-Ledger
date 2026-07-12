@@ -59,6 +59,50 @@
       </div>
     </section>
 
+    <section class="runtime-section" data-i18n-aria-label="runtime.aria">
+      <div class="section-heading">
+        <p class="eyebrow" data-i18n="runtime.eyebrow">Continuous settlement runtime</p>
+        <h2 data-i18n="runtime.title">Runtime, balance, capacity, and backlog overview</h2>
+      </div>
+      <div class="runtime-grid">
+        <div class="runtime-metric">
+          <span data-i18n="runtime.pipeline">Pipeline</span>
+          <strong id="runtimePipeline">-</strong>
+          <small id="runtimeLastWork">-</small>
+        </div>
+        <div class="runtime-metric">
+          <span data-i18n="runtime.calculationScope">Calculation scope</span>
+          <strong id="runtimeScope">-</strong>
+          <small id="runtimeCalculatedAt">-</small>
+        </div>
+        <div class="runtime-metric">
+          <span data-i18n="runtime.operatingProfit">Operating profit</span>
+          <strong id="operatingProfit">-</strong>
+          <small data-i18n="runtime.operatingProfitHelp">Revenue less operating cost</small>
+        </div>
+        <div class="runtime-metric">
+          <span data-i18n="runtime.cashBalance">Synthetic cash balance</span>
+          <strong id="cashBalance">-</strong>
+          <small id="operatingMargin">-</small>
+        </div>
+        <div class="runtime-metric">
+          <span data-i18n="runtime.capacity">Capacity utilization</span>
+          <strong id="capacityUtilization">-</strong>
+          <small id="capacityAvailable">-</small>
+        </div>
+        <div class="runtime-metric">
+          <span data-i18n="runtime.delayRate">Settlement delay rate</span>
+          <strong id="settlementDelayRate">-</strong>
+          <small id="bottleneckRole">-</small>
+        </div>
+        <div class="runtime-metric runtime-backlog">
+          <span data-i18n="runtime.backlog">Operational backlog</span>
+          <strong id="runtimeBacklog">-</strong>
+          <small data-i18n="runtime.backlogHelp">Approval / settlement / reconciliation / callback</small>
+        </div>
+      </div>
+    </section>
+
     <section class="flow-section" data-i18n-aria-label="flow.aria">
       <div class="section-heading">
         <p class="eyebrow" data-i18n="flow.eyebrow">End-to-end flow</p>

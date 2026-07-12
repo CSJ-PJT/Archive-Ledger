@@ -189,6 +189,43 @@ main {
   margin-bottom: 24px;
 }
 
+.runtime-section {
+  margin-bottom: 28px;
+}
+
+.runtime-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.runtime-metric {
+  min-height: 116px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.runtime-metric span,
+.runtime-metric small {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.runtime-metric strong {
+  display: block;
+  margin: 8px 0 6px;
+  font-size: 20px;
+  overflow-wrap: anywhere;
+}
+
+.runtime-backlog {
+  grid-column: span 2;
+}
+
 .flow-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -352,7 +389,8 @@ code {
 @media (max-width: 1050px) {
   .summary-band,
   .flow-grid,
-  .panel-grid {
+  .panel-grid,
+  .runtime-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
@@ -395,7 +433,12 @@ code {
   .summary-band,
   .flow-grid,
   .panel-grid,
+  .runtime-grid,
   .stats-list {
     grid-template-columns: 1fr;
+  }
+
+  .runtime-backlog {
+    grid-column: auto;
   }
 }
