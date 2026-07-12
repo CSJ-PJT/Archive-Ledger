@@ -83,7 +83,7 @@ function renderTransactions(rows) {
   if (!target) return;
   const selected = Array.isArray(rows) ? rows.slice(0, 10) : [];
   if (selected.length === 0) {
-    target.innerHTML = `<tr><td colspan="5">${translate("transactions.empty")}</td></tr>`;
+    target.innerHTML = `<tr><td colspan="6">${translate("transactions.empty")}</td></tr>`;
     return;
   }
   target.innerHTML = selected.map((row) => {
@@ -95,6 +95,7 @@ function renderTransactions(rows) {
         <td title="${status}">${translateStatus(status)}</td>
         <td>${formatMoney(row.amount)} ${row.currency ?? ""}</td>
         <td>${row.approvalRequired ? translate("approval.required") : translate("approval.notRequired")}</td>
+        <td><time datetime="${row.createdAt ?? ""}">${row.createdAt ? formatDateTime(row.createdAt) : "-"}</time></td>
       </tr>
     `;
   }).join("");
