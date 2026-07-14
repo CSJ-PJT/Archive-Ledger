@@ -2,9 +2,9 @@ spring:
   application:
     name: archive-ledger
   datasource:
-    url: ${ARCHIVE_LEDGER_DB_URL:jdbc:postgresql://localhost:56543/archive_ledger}
-    username: ${ARCHIVE_LEDGER_DB_USERNAME:archive_ledger}
-    password: ${ARCHIVE_LEDGER_DB_PASSWORD:archive_ledger_local}
+    url: ${ARCHIVE_LEDGER_DB_URL:}
+    username: ${ARCHIVE_LEDGER_DB_USERNAME:}
+    password: ${ARCHIVE_LEDGER_DB_PASSWORD:}
     driver-class-name: org.postgresql.Driver
     hikari:
       initialization-fail-timeout: 0
@@ -35,10 +35,31 @@ archive-ledger:
     base-url: ${ARCHIVEOS_BASE_URL:http://host.docker.internal:4000}
     enabled: ${ARCHIVEOS_APPROVAL_ENABLED:false}
     timeout-ms: ${ARCHIVEOS_TIMEOUT_MS:2000}
+  runtime-ingest:
+    enabled: ${ARCHIVEOS_RUNTIME_INGEST_ENABLED:false}
+    path: ${ARCHIVEOS_RUNTIME_INGEST_PATH:/api/live-flow/events/ingest}
+    token: ${ARCHIVE_TOKEN_LEDGER_TO_OS:}
+    timeout-ms: ${ARCHIVEOS_RUNTIME_INGEST_TIMEOUT_MS:2000}
+    scheduler-enabled: ${ARCHIVEOS_RUNTIME_INGEST_SCHEDULER_ENABLED:false}
+    initial-delay-ms: ${ARCHIVEOS_RUNTIME_INGEST_INITIAL_DELAY_MS:15000}
+    fixed-delay-ms: ${ARCHIVEOS_RUNTIME_INGEST_FIXED_DELAY_MS:15000}
+    max-retry-count: ${ARCHIVEOS_RUNTIME_INGEST_MAX_RETRY_COUNT:5}
+    max-batch-size: ${ARCHIVEOS_RUNTIME_INGEST_MAX_BATCH_SIZE:100}
   policy:
     approval-threshold-krw: ${ARCHIVE_LEDGER_APPROVAL_THRESHOLD_KRW:3000000}
 
 archive:
+  security:
+    enabled: ${ARCHIVE_SECURITY_ENABLED:false}
+    max-payload-bytes: ${ARCHIVE_SECURITY_MAX_PAYLOAD_BYTES:1048576}
+    write-requests-per-minute: ${ARCHIVE_SECURITY_WRITE_REQUESTS_PER_MINUTE:120}
+    allowed-origins: ${ARCHIVE_LEDGER_ALLOWED_ORIGINS:http://localhost:4000,http://127.0.0.1:4000}
+    market-ingest-token: ${ARCHIVE_TOKEN_MARKET_TO_LEDGER:}
+    nexus-ingest-token: ${ARCHIVE_TOKEN_NEXUS_TO_LEDGER:}
+    logistics-ingest-token: ${ARCHIVE_TOKEN_LOGISTICS_TO_LEDGER:}
+    archiveos-callback-token: ${ARCHIVE_TOKEN_OS_TO_LEDGER:}
+    admin-token: ${ARCHIVE_TOKEN_ADMIN_OPERATOR:}
+    read-token: ${ARCHIVE_TOKEN_AUTHENTICATED_READ:}
   runtime:
     autorun:
       enabled: ${ARCHIVE_RUNTIME_AUTORUN_ENABLED:true}
@@ -49,13 +70,17 @@ archive:
     callback-retry-limit: ${ARCHIVE_RUNTIME_CALLBACK_RETRY_LIMIT:3}
 
 server:
+  address: ${ARCHIVE_LEDGER_SERVER_ADDRESS:127.0.0.1}
   port: 18080
+  max-http-request-header-size: 16KB
+  tomcat:
+    max-swallow-size: 1MB
 
 management:
   endpoints:
     web:
       exposure:
-        include: health,info,prometheus
+        include: health
   endpoint:
     health:
       probes:

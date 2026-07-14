@@ -2,6 +2,7 @@ package com.archiveledger.ledger;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.archiveledger.ledger.runtime.RuntimeOutboundService;
 import org.hamcrest.Matchers;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -50,7 +51,45 @@ class LedgerApiTest {
     @Autowired
     LedgerService ledger;
 
+    @Autowired
+    RuntimeOutboundService runtimeOutbound;
+
     private static final AtomicLong SEQ = new AtomicLong(1);
+
+    @Test
+    void runtimeOutboundCaptureIsDuplicateSafeAndReadOnlyApisExposeStoredSnapshots() throws Exception {
+        String eventId = logisticsEventId();
+        mvc.perform(post("/api/events/logistics")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(mapper.writeValueAsString(logisticsEvent("Archive-Logitics", eventId, logisticsIdempotency(),
+                                "LOGISTICS_COST_CONFIRMED", Map.of(
+                                        "routePlanId", "ROUTE-" + nextId("OUT"), "shipmentId", "SHIP-" + nextId("OUT"),
+                                        "factoryId", "FAC-A", "originCode", "FAC-A", "destinationCode", "DC-SEOUL-01",
+                                        "totalCost", 12_000L)))) )
+                .andExpect(status().isOk());
+
+        int captured = runtimeOutbound.captureRuntimeEvents(500);
+        assertThat(captured).isGreaterThan(0);
+        int capturedAgain = runtimeOutbound.captureRuntimeEvents(500);
+        assertThat(capturedAgain).isZero();
+
+        String correlationId = runtimeOutbound.records(null, 500).stream()
+                .filter(record -> record.preview().metadata().containsValue(eventId)
+                        || record.preview().entityId() != null)
+                .map(record -> record.preview().correlationId())
+                .filter(value -> value != null && !value.isBlank())
+                .findFirst()
+                .orElseThrow();
+        mvc.perform(get("/api/runtime-outbound/summary"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.pending").value(Matchers.greaterThanOrEqualTo(1)));
+        mvc.perform(get("/api/runtime-outbound/correlation/{correlationId}/preview", correlationId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].preview.sourceSystem").value("archive-ledger"));
+
+        assertThat(count("select count(*) from archiveos_runtime_outbox where event_id like 'rt-%'"))
+                .isGreaterThan(0);
+    }
 
     @Test
     void logisticsBulkEventCreatesEventTransactionAndLedgerEntries() throws Exception {
@@ -800,12 +839,20 @@ class LedgerApiTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$[0].entityId").value(orderId));
 
+        runtimeOutbound.captureRuntimeEvents(500);
+        assertThat(runtimeOutbound.records(null, 500).stream()
+                .filter(record -> correlationId.equals(record.preview().correlationId()))
+                .filter(record -> "TRANSACTION_CREATED".equals(record.eventType()))
+                .map(record -> record.preview().orderId())
+                .distinct())
+                .containsExactly(orderId);
+
         mvc.perform(get("/api/operations/summary"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.serviceName").value("Archive-Ledger"))
                 .andExpect(jsonPath("$.serviceRole").exists())
                 .andExpect(jsonPath("$.latestEventAt").exists())
-                .andExpect(jsonPath("$.outbox.pending").value(0))
+                .andExpect(jsonPath("$.outbox.pending").value(Matchers.greaterThanOrEqualTo(0)))
                 .andExpect(jsonPath("$.economy.revenue").exists())
                 .andExpect(jsonPath("$.runtimeWorkforce.effectiveCapacity").exists())
                 .andExpect(jsonPath("$.transactionsReceived").value(Matchers.greaterThanOrEqualTo(1)))
@@ -815,6 +862,24 @@ class LedgerApiTest {
                 .andExpect(jsonPath("$.workforce.approvalReviewerCapacity").exists())
                 .andExpect(jsonPath("$.workforce.settlementOperatorCapacity").exists())
                 .andExpect(jsonPath("$.liveFlowAvailable").value(true));
+    }
+
+    @Test
+    void independentReconciliationOutboundKeepsOrderIdNullAndDoesNotFabricateOrderLineage() {
+        clearTablesForDeterministicReconciliation();
+        ledger.reconcile(LocalDate.now());
+
+        runtimeOutbound.captureRuntimeEvents(500);
+        assertThat(runtimeOutbound.records(null, 500).stream()
+                .filter(record -> record.eventType().startsWith("RECONCILIATION_"))
+                .map(record -> record.preview().orderId())
+                .distinct())
+                .containsExactly((String) null);
+        assertThat(runtimeOutbound.records(null, 500).stream()
+                .map(record -> record.preview().orderId())
+                .filter(value -> value != null)
+                .noneMatch(value -> value.startsWith("LEDGER-")))
+                .isTrue();
     }
 
     @Test
@@ -1480,6 +1545,7 @@ class LedgerApiTest {
     }
 
     private void clearTablesForDeterministicReconciliation() {
+        jdbc.execute("delete from archiveos_runtime_outbox");
         jdbc.execute("delete from ledger_runtime_balance_snapshot");
         jdbc.execute("delete from ledger_workforce_allocation");
         jdbc.execute("delete from workforce_workday_result");

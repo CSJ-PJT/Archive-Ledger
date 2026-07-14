@@ -53,6 +53,7 @@ public class LedgerService {
     private static final BigDecimal MARKET_APPROVAL_THRESHOLD = new BigDecimal("300000");
     private static final BigDecimal LOGISTICS_LOW_RISK_SCORE = new BigDecimal("0.85");
     private static final int BULK_RESULT_LIMIT = 50;
+    private static final int MAX_BULK_EVENTS = 1_000;
     private static final int LEDGER_BASELINE_DAILY_CAPACITY = 500;
     private static final String TARGET_LEDGER = "Archive-Ledger";
 
@@ -111,6 +112,9 @@ public class LedgerService {
     }
 
     private BulkIngestionResponse ingestBulkInternal(List<NexusEventRequest> requests, Function<NexusEventRequest, NexusEventRequest> normalizer) {
+        if (requests.size() > MAX_BULK_EVENTS) {
+            throw new IllegalArgumentException("Bulk event requests must not exceed " + MAX_BULK_EVENTS + " items.");
+        }
         List<EventIngestionResponse> results = requests.stream()
                 .map(normalizer)
                 .map(this::ingestWithSource)
@@ -2029,7 +2033,12 @@ public class LedgerService {
         WorkforceSummary workforce = workforceSummary(LocalDate.now(), "ArchiveOS");
         SettlementAgencySummary agency = settlementAgencySummary();
         SettlementBalanceSummary balance = agency.balance();
-        RuntimeOutboxSummary outbox = new RuntimeOutboxSummary(0, 0, 0, 0);
+        RuntimeOutboxSummary outbox = new RuntimeOutboxSummary(
+                count("select count(*) from archiveos_runtime_outbox where delivery_status='PENDING'"),
+                count("select count(*) from archiveos_runtime_outbox where delivery_status='PUBLISHED'"),
+                count("select count(*) from archiveos_runtime_outbox where delivery_status in ('FAILED', 'CONFIG_ERROR', 'NON_RETRYABLE_ERROR')"),
+                count("select count(*) from archiveos_runtime_outbox where delivery_status='RETRY'")
+        );
         RuntimeEconomySummary economy = new RuntimeEconomySummary(
                 balance.transactionProcessingRevenue()
                         .add(balance.settlementAgencyRevenue())

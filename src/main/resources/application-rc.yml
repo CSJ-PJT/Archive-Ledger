@@ -1,0 +1,12 @@
+archive:
+  security:
+    enabled: true
+  runtime:
+    autorun:
+      enabled: ${ARCHIVE_RUNTIME_AUTORUN_ENABLED:false}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
