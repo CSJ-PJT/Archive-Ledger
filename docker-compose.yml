@@ -59,6 +59,14 @@ services:
     depends_on:
       archive-ledger-postgres:
         condition: service_healthy
+    networks:
+      - default
+      - archive-runtime
 
 volumes:
   archive-ledger-postgres-data:
+
+networks:
+  archive-runtime:
+    external: true
+    name: archive-runtime

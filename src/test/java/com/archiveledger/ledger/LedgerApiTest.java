@@ -16,9 +16,11 @@ import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -1344,18 +1346,51 @@ class LedgerApiTest {
     void autonomousTickLimitsSettlementByCapacityAndExposesBalanceMetrics() throws Exception {
         clearTablesForDeterministicReconciliation();
         LocalDate workDate = LocalDate.now();
-        insertSettlementReadyTransactions(workDate, 55);
+        String correlationId = "CORR-SETTLEMENT-" + nextId("CORR");
+        String simulationRunId = "SIM-SETTLEMENT-" + nextId("SIM");
+        insertSettlementReadyTransactions(workDate, 55, correlationId, simulationRunId);
 
-        var tick = ledger.autonomousRuntimeTick("LEDGER-SETTLEMENT-CAPACITY-" + nextId("TICK"), 3, 10);
+        String tickId = "LEDGER-SETTLEMENT-CAPACITY-" + nextId("TICK");
+        var tick = ledger.autonomousRuntimeTick(tickId, 3, 10);
 
         assertThat(tick.eventsProduced()).isLessThanOrEqualTo(3);
         assertThat(count("select count(*) from finance_transaction where status='SETTLED'")).isEqualTo(10);
         assertThat(count("select count(*) from finance_transaction where status='SETTLEMENT_READY'")).isEqualTo(45);
         assertThat(jdbc.queryForObject("select total_transaction_count from settlement_batch where status='SUCCESS'", Integer.class)).isEqualTo(10);
 
-        mvc.perform(get("/api/runtime-events/recent").param("limit", "100"))
+        String runtimeJson = mvc.perform(get("/api/runtime-events/correlation/{correlationId}", correlationId))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$[*].eventType", Matchers.hasItems("SETTLEMENT_STARTED", "SETTLEMENT_COMPLETED")));
+                .andReturn().getResponse().getContentAsString();
+        JsonNode runtimeEvents = mapper.readTree(runtimeJson);
+        List<JsonNode> started = new ArrayList<>();
+        List<JsonNode> completed = new ArrayList<>();
+        Set<String> settlementEventIds = new HashSet<>();
+        for (JsonNode event : runtimeEvents) {
+            String eventType = event.path("eventType").asText();
+            if ("SETTLEMENT_STARTED".equals(eventType)) started.add(event);
+            if ("SETTLEMENT_COMPLETED".equals(eventType)) completed.add(event);
+            if (eventType.startsWith("SETTLEMENT_")) settlementEventIds.add(event.path("eventId").asText());
+        }
+        assertThat(started).hasSize(10);
+        assertThat(completed).hasSize(10);
+        assertThat(settlementEventIds).hasSize(20);
+        for (JsonNode event : started) {
+            assertThat(event.path("sourceService").asText()).isEqualTo("archive-ledger");
+            assertThat(event.path("correlationId").asText()).isEqualTo(correlationId);
+            assertThat(event.path("simulationRunId").asText()).isEqualTo(simulationRunId);
+            assertThat(event.path("causationId").asText()).startsWith("rt-settlement-ready-");
+        }
+        Set<String> startedEventIds = new HashSet<>();
+        for (JsonNode event : started) startedEventIds.add(event.path("eventId").asText());
+        for (JsonNode event : completed) {
+            assertThat(event.path("sourceService").asText()).isEqualTo("archive-ledger");
+            assertThat(event.path("correlationId").asText()).isEqualTo(correlationId);
+            assertThat(event.path("simulationRunId").asText()).isEqualTo(simulationRunId);
+            assertThat(startedEventIds).contains(event.path("causationId").asText());
+        }
+        var duplicateTick = ledger.autonomousRuntimeTick(tickId, 3, 10);
+        assertThat(duplicateTick.duplicate()).isTrue();
+        assertThat(count("select count(*) from settlement_batch where status='SUCCESS'")).isEqualTo(1);
 
         mvc.perform(get("/api/settlement-agency/summary"))
                 .andExpect(status().isOk())
@@ -1565,7 +1600,16 @@ class LedgerApiTest {
         insertSyntheticTransactions(workDate, "SETTLEMENT_READY", count);
     }
 
+    private void insertSettlementReadyTransactions(LocalDate workDate, int count, String correlationId, String simulationRunId) {
+        insertSyntheticTransactions(workDate, "SETTLEMENT_READY", count, correlationId, simulationRunId);
+    }
+
     private void insertSyntheticTransactions(LocalDate workDate, String status, int count) {
+        insertSyntheticTransactions(workDate, status, count, null, null);
+    }
+
+    private void insertSyntheticTransactions(LocalDate workDate, String status, int count,
+                                             String correlationId, String simulationRunId) {
         for (int i = 0; i < count; i++) {
             String id = "TX-WF-" + i + "-" + nextId("TX");
             jdbc.update("""
@@ -1573,7 +1617,8 @@ class LedgerApiTest {
                         transaction_id,source_event_id,idempotency_key,transaction_type,
                         factory_id,vendor_id,synthetic_account_id,amount,currency,status,
                         approval_required,approval_request_id,reason,occurred_at,created_at,updated_at
-                    ) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        ,source_service,correlation_id,simulation_run_id
+                    ) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     id,
                     "EVT-WF-" + i + "-" + nextId("EVT"),
@@ -1590,7 +1635,10 @@ class LedgerApiTest {
                     "synthetic workforce demand",
                     java.sql.Timestamp.valueOf(workDate.atTime(10, 0)),
                     java.sql.Timestamp.valueOf(workDate.atTime(10, 0)),
-                    java.sql.Timestamp.valueOf(workDate.atTime(10, 0))
+                    java.sql.Timestamp.valueOf(workDate.atTime(10, 0)),
+                    correlationId == null ? null : "archive-ledger",
+                    correlationId,
+                    simulationRunId
             );
         }
     }

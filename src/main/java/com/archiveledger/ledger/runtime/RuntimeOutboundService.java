@@ -216,7 +216,7 @@ public class RuntimeOutboundService {
     private RuntimeOutboundEvent toOutbound(RuntimeEventView event) {
         Map<String, Object> metadata = sanitizeMetadata(event.metadata());
         String correlationId = value(event.correlationId(), event.entityId());
-        String causationId = value(event.causationId(), event.eventId());
+        String causationId = resolvedCausationId(event);
         String orderId = resolveOrderId(event, metadata);
         return new RuntimeOutboundEvent(
                 event.eventId(), event.idempotencyKey(), ArchiveOsRuntimePublisher.SOURCE_SYSTEM,
@@ -235,6 +235,21 @@ public class RuntimeOutboundService {
             }
         });
         return sanitized;
+    }
+
+    /**
+     * Ledger transaction projections must preserve the upstream business parent rather than
+     * introducing the received-event transport ID as a timeline-only parent.
+     */
+    private String resolvedCausationId(RuntimeEventView event) {
+        String direct = value(event.causationId(), event.eventId());
+        if (!"TRANSACTION_CREATED".equals(event.eventType()) || direct.equals(event.eventId())) {
+            return direct;
+        }
+        List<String> upstream = jdbc.query(
+                "select causation_id from received_event where event_id=? and causation_id is not null and causation_id<>''",
+                (rs, row) -> rs.getString(1), direct);
+        return upstream.isEmpty() ? direct : upstream.getFirst();
     }
 
     /**
