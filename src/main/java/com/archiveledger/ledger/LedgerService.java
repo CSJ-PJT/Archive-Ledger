@@ -53,6 +53,7 @@ public class LedgerService {
     private static final BigDecimal MARKET_APPROVAL_THRESHOLD = new BigDecimal("300000");
     private static final BigDecimal LOGISTICS_LOW_RISK_SCORE = new BigDecimal("0.85");
     private static final int BULK_RESULT_LIMIT = 50;
+    private static final int MAX_BULK_EVENTS = 1_000;
     private static final int LEDGER_BASELINE_DAILY_CAPACITY = 500;
     private static final String TARGET_LEDGER = "Archive-Ledger";
 
@@ -111,6 +112,9 @@ public class LedgerService {
     }
 
     private BulkIngestionResponse ingestBulkInternal(List<NexusEventRequest> requests, Function<NexusEventRequest, NexusEventRequest> normalizer) {
+        if (requests.size() > MAX_BULK_EVENTS) {
+            throw new IllegalArgumentException("Bulk event requests must not exceed " + MAX_BULK_EVENTS + " items.");
+        }
         List<EventIngestionResponse> results = requests.stream()
                 .map(normalizer)
                 .map(this::ingestWithSource)
@@ -937,7 +941,7 @@ public class LedgerService {
             throw new IllegalArgumentException("idempotencyKey is required.");
         }
 
-        String source = value(request.source(), SOURCE_NEXUS);
+        String source = canonicalSource(value(request.source(), SOURCE_NEXUS));
         Map<String, Object> payload = request.payload();
         String simulationRunId = firstText(request.simulationRunId(), text(payload == null ? null : payload.get("simulationRunId")));
         String settlementCycleId = firstText(request.settlementCycleId(), text(payload == null ? null : payload.get("settlementCycleId")));
@@ -1732,7 +1736,7 @@ public class LedgerService {
             String detailCorrelationId = firstText(rs.getString("correlation_id"), rs.getString("transaction_correlation_id"));
             projected.add(runtimeView(
                     startedEventId,
-                    TARGET_LEDGER,
+                    "archive-ledger",
                     "settlement",
                     "SETTLEMENT_STARTED",
                     "transaction",
@@ -1748,7 +1752,7 @@ public class LedgerService {
             if ("SUCCESS".equals(rs.getString("batch_status"))) {
                 projected.add(runtimeView(
                         "rt-settlement-completed-" + batchId + "-" + transactionId,
-                        TARGET_LEDGER,
+                        "archive-ledger",
                         "settlement",
                         "SETTLEMENT_COMPLETED",
                         "transaction",
@@ -2029,7 +2033,12 @@ public class LedgerService {
         WorkforceSummary workforce = workforceSummary(LocalDate.now(), "ArchiveOS");
         SettlementAgencySummary agency = settlementAgencySummary();
         SettlementBalanceSummary balance = agency.balance();
-        RuntimeOutboxSummary outbox = new RuntimeOutboxSummary(0, 0, 0, 0);
+        RuntimeOutboxSummary outbox = new RuntimeOutboxSummary(
+                count("select count(*) from archiveos_runtime_outbox where delivery_status='PENDING'"),
+                count("select count(*) from archiveos_runtime_outbox where delivery_status='PUBLISHED'"),
+                count("select count(*) from archiveos_runtime_outbox where delivery_status in ('FAILED', 'CONFIG_ERROR', 'NON_RETRYABLE_ERROR')"),
+                count("select count(*) from archiveos_runtime_outbox where delivery_status='RETRY'")
+        );
         RuntimeEconomySummary economy = new RuntimeEconomySummary(
                 balance.transactionProcessingRevenue()
                         .add(balance.settlementAgencyRevenue())
@@ -2128,6 +2137,18 @@ public class LedgerService {
 
     private boolean isMarketSource(String source) {
         return SOURCE_MARKET.equals(source);
+    }
+
+    /** Accept canonical wire identities while keeping persisted source labels stable for existing reports. */
+    private String canonicalSource(String source) {
+        if (source == null || source.isBlank()) return SOURCE_NEXUS;
+        return switch (source.trim().toLowerCase(Locale.ROOT)) {
+            case "archive-market" -> SOURCE_MARKET;
+            case "archive-nexus" -> SOURCE_NEXUS;
+            case "archive-logitics" -> SOURCE_LOGITICS;
+            case "archive-logistics" -> SOURCE_LOGISTICS;
+            default -> source.trim();
+        };
     }
 
     private void appendSourceFilter(StringBuilder sql, List<Object> args, String expression, String source) {

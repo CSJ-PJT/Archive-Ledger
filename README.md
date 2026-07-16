@@ -4,6 +4,14 @@
 
 # Archive-Ledger
 
+## ArchiveOS Runtime Outbound
+
+Ledger retains the cursor-based Runtime Mesh pull APIs and can additionally publish selected synthetic Ledger lifecycle events to ArchiveOS Live Flow. Runtime ingest is independent from the ArchiveOS approval client: enable it only with `ARCHIVEOS_RUNTIME_INGEST_ENABLED=true` and provide `ARCHIVE_TOKEN_LEDGER_TO_OS`. Delivery uses the persisted `archiveos_runtime_outbox`; ArchiveOS unavailability does not roll back transaction, ledger entry, settlement, or reconciliation processing. See [ArchiveOS runtime outbound](docs/archiveos-runtime-outbound.md).
+
+## RC Security Baseline
+
+The default Compose configuration is RC-oriented: PostgreSQL is private to the Docker network, Ledger binds to `127.0.0.1`, and RC startup requires environment-provided DB credentials and scoped service tokens. Protected writes require `Authorization: Bearer`, `X-Archive-Source-System`, and `X-Archive-Service-Scope`; health remains available for container probes. See [RC security baseline](docs/rc-security-baseline.md) and the [credential rotation runbook](docs/credential-rotation-runbook.md). `.env.example` contains variable names only.
+
 Archive-Ledger는 Archive Platform Ecosystem에서 **이벤트 기반 거래 처리, 복식 원장, 정산, 대사, 승인 callback, workforce 기반 처리량 관제**를 담당하는 Spring Boot 금융 백엔드입니다.
 
 Archive-Nexus direct 비용 이벤트, Archive-Logistics 물류비 확정 이벤트, Archive-Market 매출/결제/환불/클레임 이벤트를 수신해 `finance_transaction`으로 정규화하고, debit/credit 균형이 맞는 `ledger_entry`를 생성합니다. 이후 정산 배치, 대사, 승인 callback, settlement agency 수익/비용 요약을 제공합니다.

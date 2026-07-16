@@ -3,7 +3,9 @@ WORKDIR /workspace
 COPY gradlew gradlew.bat settings.gradle.kts build.gradle.kts ./
 COPY gradle ./gradle
 COPY src ./src
-RUN ./gradlew bootJar --no-daemon
+RUN sed -i 's/\r$//' gradlew \
+    && chmod +x gradlew \
+    && ./gradlew bootJar --no-daemon
 
 FROM eclipse-temurin:21-jre
 WORKDIR /app

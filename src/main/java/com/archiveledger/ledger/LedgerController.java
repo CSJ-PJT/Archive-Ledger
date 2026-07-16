@@ -1,6 +1,11 @@
 package com.archiveledger.ledger;
 
 import com.archiveledger.ledger.common.LedgerModels.*;
+import com.archiveledger.ledger.security.ArchiveInboundSourceValidator;
+import com.archiveledger.ledger.security.ArchiveRequestSecurityFilter;
+import com.archiveledger.ledger.runtime.RuntimeOutboundService;
+import com.archiveledger.ledger.runtime.RuntimeOutboundModels.RuntimeOutboundRecord;
+import com.archiveledger.ledger.runtime.RuntimeOutboundModels.RuntimeOutboundSummary;
 import jakarta.validation.Valid;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.ResponseEntity;
@@ -14,38 +19,57 @@ import java.util.Map;
 @RequestMapping("/api")
 public class LedgerController {
     private final LedgerService ledger;
+    private final ArchiveInboundSourceValidator inboundSourceValidator;
+    private final RuntimeOutboundService runtimeOutbound;
 
-    public LedgerController(LedgerService ledger) {
+    public LedgerController(LedgerService ledger, ArchiveInboundSourceValidator inboundSourceValidator,
+                            RuntimeOutboundService runtimeOutbound) {
         this.ledger = ledger;
+        this.inboundSourceValidator = inboundSourceValidator;
+        this.runtimeOutbound = runtimeOutbound;
     }
 
     @PostMapping("/events/nexus")
-    EventIngestionResponse ingest(@Valid @RequestBody NexusEventRequest request) {
+    EventIngestionResponse ingest(@RequestHeader(value = ArchiveRequestSecurityFilter.SOURCE_HEADER, required = false) String sourceHeader,
+                                  @Valid @RequestBody NexusEventRequest request) {
+        inboundSourceValidator.verify(sourceHeader, request.source(), "archive-nexus");
         return ledger.ingest(request);
     }
 
     @PostMapping("/events/nexus/bulk")
-    BulkIngestionResponse ingestBulk(@Valid @RequestBody List<NexusEventRequest> requests) {
+    BulkIngestionResponse ingestBulk(@RequestHeader(value = ArchiveRequestSecurityFilter.SOURCE_HEADER, required = false) String sourceHeader,
+                                     @Valid @RequestBody List<NexusEventRequest> requests) {
+        requests.forEach(request -> inboundSourceValidator.verify(sourceHeader, request.source(), "archive-nexus"));
         return ledger.ingestBulk(requests);
     }
 
     @PostMapping("/events/logistics")
-    EventIngestionResponse ingestLogistics(@Valid @RequestBody NexusEventRequest request) {
+    EventIngestionResponse ingestLogistics(@RequestHeader(value = ArchiveRequestSecurityFilter.SOURCE_HEADER, required = false) String sourceHeader,
+                                           @Valid @RequestBody NexusEventRequest request) {
+        inboundSourceValidator.verify(sourceHeader, request.source(), "archive-logistics", "Archive-Logitics");
         return ledger.ingestLogistics(request);
     }
 
     @PostMapping("/events/logistics/bulk")
-    BulkIngestionResponse ingestLogisticsBulk(@Valid @RequestBody LogisticsBulkRequest request) {
+    BulkIngestionResponse ingestLogisticsBulk(@RequestHeader(value = ArchiveRequestSecurityFilter.SOURCE_HEADER, required = false) String sourceHeader,
+                                              @Valid @RequestBody LogisticsBulkRequest request) {
+        inboundSourceValidator.verify(sourceHeader, request.source(), "archive-logistics", "Archive-Logitics");
+        request.events().forEach(event -> inboundSourceValidator.verify(sourceHeader, event.source(), "archive-logistics", "Archive-Logitics"));
         return ledger.ingestLogisticsBulk(request);
     }
 
     @PostMapping("/events/market")
-    EventIngestionResponse ingestMarket(@Valid @RequestBody NexusEventRequest request) {
+    EventIngestionResponse ingestMarket(@RequestHeader(value = ArchiveRequestSecurityFilter.SOURCE_HEADER, required = false) String sourceHeader,
+                                        @Valid @RequestBody NexusEventRequest request) {
+        inboundSourceValidator.verify(sourceHeader, request.source(), "archive-market");
         return ledger.ingestMarket(request);
     }
 
     @PostMapping("/events/market/bulk")
-    BulkIngestionResponse ingestMarketBulk(@Valid @RequestBody MarketBulkRequest request) {
+    BulkIngestionResponse ingestMarketBulk(@RequestHeader(value = ArchiveRequestSecurityFilter.SOURCE_HEADER, required = false) String sourceHeader,
+                                           @Valid @RequestBody MarketBulkRequest request) {
+        inboundSourceValidator.verify(sourceHeader, request.source(), "archive-market");
+        request.events().forEach(event -> inboundSourceValidator.verify(sourceHeader, event.source(), "archive-market"));
         return ledger.ingestMarketBulk(request);
     }
 
@@ -97,6 +121,22 @@ public class LedgerController {
     @GetMapping("/runtime-events/entity/{entityId}")
     List<RuntimeEventView> runtimeEventsByEntity(@PathVariable String entityId) {
         return ledger.runtimeEventsByEntity(entityId);
+    }
+
+    @GetMapping("/runtime-outbound/summary")
+    RuntimeOutboundSummary runtimeOutboundSummary() {
+        return runtimeOutbound.summary();
+    }
+
+    @GetMapping("/runtime-outbound/events")
+    List<RuntimeOutboundRecord> runtimeOutboundEvents(@RequestParam(required = false) String status,
+                                                       @RequestParam(defaultValue = "100") int limit) {
+        return runtimeOutbound.records(status, limit);
+    }
+
+    @GetMapping("/runtime-outbound/correlation/{correlationId}/preview")
+    List<RuntimeOutboundRecord> runtimeOutboundPreview(@PathVariable String correlationId) {
+        return runtimeOutbound.previewByCorrelation(correlationId);
     }
 
     @PostMapping("/settlements/daily/run")
