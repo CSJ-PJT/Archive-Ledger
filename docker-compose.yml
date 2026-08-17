@@ -2,6 +2,7 @@ services:
   archive-ledger-postgres:
     image: postgres:16
     container_name: archive-ledger-postgres
+    restart: unless-stopped
     environment:
       POSTGRES_DB: ${ARCHIVE_LEDGER_POSTGRES_DB:-archive_ledger}
       POSTGRES_USER: ${ARCHIVE_LEDGER_POSTGRES_USER:-archive_ledger}
@@ -20,6 +21,7 @@ services:
     build:
       context: .
     container_name: archive-ledger
+    restart: unless-stopped
     environment:
       ARCHIVE_LEDGER_DB_URL: jdbc:postgresql://archive-ledger-postgres:5432/archive_ledger
       ARCHIVE_LEDGER_DB_USERNAME: ${ARCHIVE_LEDGER_POSTGRES_USER:-archive_ledger}
