@@ -822,7 +822,13 @@ public class LedgerService {
     private SettlementBalanceSummary settlementBalanceSummary() {
         List<SettlementBalanceSummary> snapshots = jdbc.query("""
                 select * from ledger_runtime_balance_snapshot
-                order by work_date desc, calculated_at desc limit 1
+                order by case when
+                    transaction_processing_revenue <> 0 or settlement_agency_revenue <> 0 or
+                    reconciliation_revenue <> 0 or approval_review_revenue <> 0 or
+                    operating_cost <> 0 or operating_profit <> 0
+                    then 0 else 1 end,
+                    work_date desc, calculated_at desc
+                limit 1
                 """, this::settlementBalanceRow);
         if (!snapshots.isEmpty()) {
             return snapshots.get(0);
@@ -1894,6 +1900,10 @@ public class LedgerService {
         Instant lastSettlement = jdbc.query("select completed_at from settlement_batch where completed_at is not null order by completed_at desc limit 1",
                 rs -> rs.next() ? instant(rs.getTimestamp(1)) : null);
         long failed = count("select count(*) from received_event where processing_status='FAILED'");
+        long recentFailed = count(
+                "select count(*) from received_event where processing_status='FAILED' and received_at >= ?",
+                ts(Instant.now().minus(Duration.ofHours(24)))
+        );
         long received = count("select count(*) from received_event");
         long transactionCount = count("select count(*) from finance_transaction");
         long duplicates = count("select count(*) from audit_log where action='DUPLICATE_EVENT'");
@@ -1930,7 +1940,7 @@ public class LedgerService {
         long settlementCompleted = count("select count(*) from settlement_batch where status='SUCCESS'");
         long reconciliationWarnings = count("select count(*) from reconciliation_result where mismatch_count > 0 or status='WARNING'");
         long callbackFailed = count("select count(*) from audit_log where action='ARCHIVEOS_APPROVAL_DEGRADED'");
-        String status = failed > 0 ? "DEGRADED" : "HEALTHY";
+        String status = recentFailed > 0 ? "DEGRADED" : "HEALTHY";
         WorkforceSummary workforce = workforceSummary(LocalDate.now(), "ArchiveOS");
         SettlementAgencySummary agency = settlementAgencySummary();
         SettlementBalanceSummary balance = agency.balance();
@@ -1979,7 +1989,7 @@ public class LedgerService {
                 outbox,
                 economy,
                 runtimeWorkforce,
-                failed > 0 ? "FAILED_EVENTS_PRESENT" : null,
+                recentFailed > 0 ? "RECENT_FAILED_EVENTS_PRESENT" : null,
                 true,
                 received,
                 transactionCount,
