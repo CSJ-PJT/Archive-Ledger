@@ -1,0 +1,5 @@
+# Development-only override for local database tools. Do not use for RC deployment.
+services:
+  archive-ledger-postgres:
+    ports:
+      - "127.0.0.1:${ARCHIVE_LEDGER_DB_HOST_PORT:-56543}:5432"

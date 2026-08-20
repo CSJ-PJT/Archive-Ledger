@@ -4,6 +4,7 @@ out/
 data/
 *.log
 .env
+.env.rc
 *.local
 *.tsbuildinfo
 node_modules/

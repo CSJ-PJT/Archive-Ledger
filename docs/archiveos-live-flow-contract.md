@@ -1,5 +1,9 @@
 # ArchiveOS Live Flow Contract
 
+## Runtime Outbound Delivery
+
+Cursor pull remains supported. When `ARCHIVEOS_RUNTIME_INGEST_ENABLED=true`, Ledger also captures selected lifecycle projections into `archiveos_runtime_outbox` and delivers them to ArchiveOS through the canonical internal ingest endpoint. The delivery state is separate from business processing: 2xx responses are published, credential errors are not retried, and transient failures use bounded backoff. See [archiveos-runtime-outbound.md](archiveos-runtime-outbound.md).
+
 Archive-Ledger는 ArchiveOS Live Flow / Operational Twin이 read-only로 수집할 수 있는 운영 데이터를 제공한다.
 
 모든 데이터는 Synthetic Runtime Data다. 실제 개인정보, 실제 결제정보, 실제 금융정보, 실제 직원정보는 저장하거나 노출하지 않는다.

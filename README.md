@@ -1,16 +1,16 @@
-<p align="center">
+﻿<p align="center">
   <img src="docs/brand/archive-ledger-lockup.svg" width="900" alt="Archive-Ledger" />
 </p>
 
 # Archive-Ledger
 
-Archive-Ledger는 Archive Platform Ecosystem에서 **이벤트 기반 거래 처리, 복식 원장, 정산, 대사, 승인 callback, workforce 기반 처리량 관제**를 담당하는 Spring Boot 금융 백엔드입니다.
+Archive-Ledger는 Archive Platform Ecosystem에서 이벤트 기반 거래 처리, 복식 원장, 정산, 대사, 승인 callback, workforce 기반 처리량 관제를 담당하는 Spring Boot 금융 백엔드입니다.
 
-Archive-Nexus direct 비용 이벤트, Archive-Logistics 물류비 확정 이벤트, Archive-Market 매출/결제/환불/클레임 이벤트를 수신해 `finance_transaction`으로 정규화하고, debit/credit 균형이 맞는 `ledger_entry`를 생성합니다. 이후 정산 배치, 대사, 승인 callback, settlement agency 수익/비용 요약을 제공합니다.
+Archive-Nexus direct 비용 이벤트, Archive-Logistics 물류비 확정 이벤트, Archive-Market 매출/결제/환불/클레임 이벤트를 수신해 finance_transaction으로 정규화하고, debit/credit 균형이 맞는 ledger_entry를 생성합니다. 이후 정산 배치, 대사, 승인 callback, settlement agency 수익/비용 요약을 제공합니다.
 
 > 모든 데이터는 Synthetic Data / Demo Data입니다. 실제 카드번호, 계좌번호, 개인정보, 실제 금융 데이터, 실제 배송/위치 데이터는 사용하지 않습니다.
 
-## Archive Runtime Mesh V1
+## Archive 런타임 Mesh V1
 
 ArchiveOS Console V3는 Ledger의 runtime projection을 pull 방식으로 수집할 수 있습니다. 모든 조회 API는 read-only이며, 조회 호출이 거래 생성, 정산 실행, 대사 실행, callback 전송을 유발하지 않습니다.
 
@@ -128,7 +128,7 @@ ArchiveOS
 
 모든 cross-service event는 `eventId`, `idempotencyKey`, `correlationId`, `causationId`, `simulationRunId`, `settlementCycleId`, `hopCount`, `maxHop` 기반으로 추적하며, duplicate guard와 hop guard로 무한 순환을 방지합니다.
 
-## Core Flow
+## 핵심 처리 흐름
 
 ```text
 External Synthetic Events
@@ -282,7 +282,7 @@ sum(ledger_entry.credit_amount)
 - `APPROVED` -> `SETTLEMENT_READY`
 - `REJECTED` -> `REJECTED`
 
-## Reconciliation
+## 대사(재조정)
 
 대사는 이벤트 수신, 중복, 실패, 거래 생성 수를 기준으로 mismatch를 계산합니다.
 
@@ -296,7 +296,7 @@ mismatch = max(0, expectedTransactionCount - created - failed)
 - `OK`
 - `WARNING`
 
-## Operational Workforce
+## 운영 워크포스
 
 Archive-Ledger는 정산/대사/승인/callback 업무를 synthetic workforce 기반 capacity 모델로 계산합니다.
 
@@ -322,7 +322,7 @@ Archive-Ledger는 정산/대사/승인/callback 업무를 synthetic workforce �
 
 workforce allocation이 없으면 baseline capacity로 동작합니다. 실제 직원 이름, 급여, 개인정보는 사용하지 않으며 모든 비용은 synthetic KRW입니다.
 
-## Settlement Agency Model
+## 정산대행 모델
 
 Ledger는 정산대행 서비스로 동작합니다. Workforce 처리량과 backlog는 settlement agency 수익/비용 요약에 반영됩니다.
 
@@ -417,7 +417,7 @@ curl.exe http://localhost:18080/api/settlement-agency/summary
 - approval required 거래는 정산 제외
 - 외부 연동 장애는 Ledger 런타임 장애로 전파하지 않음
 - workforce 이벤트는 무한 fee loop를 만들지 않도록 summary/audit 중심으로 처리
-## Autonomous Runtime Work Loop
+## 자율 런타임 작업 루프
 
 Archive-Ledger는 local/demo runtime에서 제한된 속도의 autonomous work tick을 수행할 수 있습니다.
 
@@ -435,3 +435,28 @@ archive.runtime.max-backlog-per-tick: 50
 ```
 
 tick은 workday capacity, reconciliation, 제한된 settlement 진행 상태를 갱신하고 runtime event projection에 반영합니다. Summary GET API는 read-only이며 tick을 실행하지 않습니다.
+
+## ArchiveOS 런타임 아웃바운드
+
+Ledger는 커서 기반 `Runtime Mesh` pull API를 보유하며, 선택한 합성 Ledger 라이프사이클 이벤트를 `ArchiveOS Live Flow`로 추가 발행할 수 있습니다.
+
+운영 ingest는 ArchiveOS 승인 클라이언트와 독립적으로 동작합니다.
+- `ARCHIVEOS_RUNTIME_INGEST_ENABLED=true`가 활성화되어 있어야 합니다.
+- `ARCHIVE_TOKEN_LEDGER_TO_OS`를 설정해야 합니다.
+- 전송은 영속화된 `archiveos_runtime_outbox`를 통해 수행됩니다.
+- ArchiveOS가 일시적으로 비정상이더라도 거래, 원장, 정산, 대사 처리는 롤백되지 않습니다.
+
+자세한 내용은 [ArchiveOS runtime outbound](docs/archiveos-runtime-outbound.md)를 참고하세요.
+
+## RC 보안 기준선
+
+기본 Compose 설정은 RC 지향입니다.
+- PostgreSQL은 Docker 네트워크 내부에서만 접근 가능합니다.
+- Ledger는 `127.0.0.1` 바인딩으로 실행됩니다.
+- RC 시작에는 환경변수 기반 DB 자격증명과 범위가 제한된 서비스 토큰이 필요합니다.
+- 보호된 쓰기 요청은 `Authorization: Bearer`, `X-Archive-Source-System`, `X-Archive-Service-Scope`가 필요합니다.
+- Health 체크는 컨테이너 프로브에서 계속 확인 가능합니다.
+
+상세 기준은 [RC security baseline](docs/rc-security-baseline.md)와 [credential rotation runbook](docs/credential-rotation-runbook.md)에서 확인할 수 있습니다.
+
+`.env.example`에는 변수명만 노출됩니다.
