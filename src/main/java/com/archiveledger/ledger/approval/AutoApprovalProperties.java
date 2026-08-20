@@ -11,8 +11,8 @@ public class AutoApprovalProperties {
     public static final BigDecimal MIN_AMOUNT_KRW = new BigDecimal("300000");
     public static final BigDecimal MAX_AMOUNT_KRW = new BigDecimal("500000");
     public static final BigDecimal MAX_RISK_SCORE = new BigDecimal("0.50");
-    public static final int SAFETY_MAX_DAILY_COUNT = 20;
-    public static final BigDecimal SAFETY_MAX_DAILY_AMOUNT_KRW = new BigDecimal("10000000");
+    public static final int SAFETY_MAX_DAILY_COUNT = 2000;
+    public static final BigDecimal SAFETY_MAX_DAILY_AMOUNT_KRW = new BigDecimal("1000000000");
     public static final String ALLOWED_EVENT_TYPE = "LOGISTICS_COST_CONFIRMED";
     public static final String ALLOWED_TRANSACTION_TYPE = "LOGISTICS_COST";
 
@@ -25,8 +25,8 @@ public class AutoApprovalProperties {
     public AutoApprovalProperties(
             @Value("${archive-ledger.auto-approval.mode:DISABLED}") String mode,
             @Value("${archive-ledger.auto-approval.policy-version:logistics-amount-only-v1}") String policyVersion,
-            @Value("${archive-ledger.auto-approval.max-daily-count:20}") int maxDailyCount,
-            @Value("${archive-ledger.auto-approval.max-daily-amount-krw:10000000}") BigDecimal maxDailyAmountKrw) {
+            @Value("${archive-ledger.auto-approval.max-daily-count:2000}") int maxDailyCount,
+            @Value("${archive-ledger.auto-approval.max-daily-amount-krw:1000000000}") BigDecimal maxDailyAmountKrw) {
         Mode parsedMode = Mode.parse(mode);
         String normalizedVersion = policyVersion == null ? "" : policyVersion.trim();
         boolean limitsValid = maxDailyCount > 0

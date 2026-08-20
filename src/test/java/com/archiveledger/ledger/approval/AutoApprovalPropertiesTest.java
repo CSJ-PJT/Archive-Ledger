@@ -10,11 +10,11 @@ class AutoApprovalPropertiesTest {
     @Test
     void clampsConfiguredBudgetsToHardSafetyCeilings() {
         AutoApprovalProperties properties = new AutoApprovalProperties(
-                "ENFORCE", "v1", 999, new BigDecimal("999999999"));
+                "ENFORCE", "v1", 9999, new BigDecimal("9999999999"));
 
         assertThat(properties.mode()).isEqualTo(AutoApprovalProperties.Mode.ENFORCE);
-        assertThat(properties.maxDailyCount()).isEqualTo(20);
-        assertThat(properties.maxDailyAmountKrw()).isEqualByComparingTo("10000000");
+        assertThat(properties.maxDailyCount()).isEqualTo(2000);
+        assertThat(properties.maxDailyAmountKrw()).isEqualByComparingTo("1000000000");
     }
 
     @Test

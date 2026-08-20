@@ -50,8 +50,8 @@ archive-ledger:
   auto-approval:
     mode: ${ARCHIVE_LEDGER_AUTO_APPROVAL_MODE:DISABLED}
     policy-version: ${ARCHIVE_LEDGER_AUTO_APPROVAL_POLICY_VERSION:logistics-amount-only-v1}
-    max-daily-count: ${ARCHIVE_LEDGER_AUTO_APPROVAL_MAX_DAILY_COUNT:20}
-    max-daily-amount-krw: ${ARCHIVE_LEDGER_AUTO_APPROVAL_MAX_DAILY_AMOUNT_KRW:10000000}
+    max-daily-count: ${ARCHIVE_LEDGER_AUTO_APPROVAL_MAX_DAILY_COUNT:2000}
+    max-daily-amount-krw: ${ARCHIVE_LEDGER_AUTO_APPROVAL_MAX_DAILY_AMOUNT_KRW:1000000000}
 
 archive:
   security:
