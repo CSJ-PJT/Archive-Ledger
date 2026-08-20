@@ -150,7 +150,8 @@ public final class LedgerModels {
     public record RuntimeOutboxSummary(long pending, long published, long failed, long retry) {
     }
 
-    public record RuntimeEconomySummary(BigDecimal revenue, BigDecimal cost, BigDecimal profit) {
+    public record RuntimeEconomySummary(BigDecimal revenue, BigDecimal cost, BigDecimal profit,
+                                        BigDecimal backlogExposure) {
     }
 
     public record RuntimeWorkforceSummary(int totalHeadcount, int effectiveCapacity, int usedCapacity, int backlog) {
@@ -334,6 +335,7 @@ public final class LedgerModels {
             BigDecimal reconciliationDelayCost,
             BigDecimal approvalBacklogCost,
             BigDecimal callbackDelayCost,
+            BigDecimal backlogExposure,
             BigDecimal totalCost,
             BigDecimal netRevenue,
             int transactionsProcessed,
@@ -376,7 +378,13 @@ public final class LedgerModels {
             String bottleneckRole,
             BigDecimal settlementDelayRate,
             int negativeProfitStreak,
-            Instant calculatedAt
+            Instant calculatedAt,
+            String currency,
+            LocalDate periodStart,
+            LocalDate periodEnd,
+            BigDecimal recognizedRevenue,
+            BigDecimal realizedOperatingCost,
+            BigDecimal backlogExposure
     ) {
     }
 }

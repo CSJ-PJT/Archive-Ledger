@@ -13,6 +13,9 @@ public class LedgerMetrics {
     private final Counter duplicateEvents;
     private final Counter transactionsCreated;
     private final Counter approvalRequired;
+    private final Counter autoApprovalEvaluated;
+    private final Counter autoApprovalApplied;
+    private final Counter autoApprovalDeferred;
     private final Counter settlementCompleted;
     private final Counter reconciliationMismatch;
     private final Counter processingFailure;
@@ -23,6 +26,9 @@ public class LedgerMetrics {
         this.duplicateEvents = registry.counter("ledger_duplicate_events_total");
         this.transactionsCreated = registry.counter("ledger_transactions_created_total");
         this.approvalRequired = registry.counter("ledger_approval_required_total");
+        this.autoApprovalEvaluated = registry.counter("ledger_auto_approval_evaluated_total");
+        this.autoApprovalApplied = registry.counter("ledger_auto_approval_applied_total");
+        this.autoApprovalDeferred = registry.counter("ledger_auto_approval_deferred_total");
         this.settlementCompleted = registry.counter("ledger_settlement_completed_total");
         this.reconciliationMismatch = registry.counter("ledger_reconciliation_mismatch_total");
         this.processingFailure = registry.counter("ledger_event_processing_failure_total");
@@ -33,6 +39,9 @@ public class LedgerMetrics {
     public void duplicateEvent() { duplicateEvents.increment(); }
     public void transactionCreated() { transactionsCreated.increment(); }
     public void approvalRequired() { approvalRequired.increment(); }
+    public void autoApprovalEvaluated() { autoApprovalEvaluated.increment(); }
+    public void autoApprovalApplied() { autoApprovalApplied.increment(); }
+    public void autoApprovalDeferred() { autoApprovalDeferred.increment(); }
     public void settlementCompleted() { settlementCompleted.increment(); }
     public void reconciliationMismatch(long count) { if (count > 0) reconciliationMismatch.increment(count); }
     public void processingFailure() { processingFailure.increment(); }

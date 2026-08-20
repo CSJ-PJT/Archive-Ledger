@@ -34,10 +34,11 @@ Runtime tick은 이미 수신된 synthetic Market/Nexus/Logistics 이벤트의 �
 
 - event receiver는 수신 시 `finance_transaction`, debit/credit `ledger_entry`, approval rule을 즉시 처리합니다.
 - tick은 `WORKDAY_COMPLETED` capacity 결과를 생성하고 `SETTLEMENT_OPERATOR` capacity 및 `max-backlog-per-tick` 범위에서만 `SETTLEMENT_READY` 거래를 정산합니다.
-- `APPROVAL_REQUIRED` 거래는 자동 승인하지 않습니다. `POST /api/approvals/callback`의 승인 결과가 `SETTLEMENT_READY`로 전이된 뒤에만 다음 tick의 정산 대상이 됩니다.
+- 자동 승인은 신규 ingest 경로에서만 평가합니다. `ENFORCE`일 때 금액만으로 승인이 필요한 일반 Logistics 건 중 300,000~500,000 KRW, risk `< 0.50`, Logistics 승인 severity `HIGH`, priority `NORMAL`, 지연/우회/콜드체인/긴급 신호가 없는 건만 하루 20건/10,000,000 KRW 한도에서 원자적으로 `SETTLEMENT_READY`로 전이합니다. 기존 승인 큐는 검색하거나 변경하지 않습니다.
+- 정책 모드는 `DISABLED`, `SHADOW`, `ENFORCE`이며, 그 밖의 승인 건은 기존 `POST /api/approvals/callback` 경로를 유지합니다. 설정이나 필수 증거가 잘못되면 자동 승인을 적용하지 않습니다.
 - ArchiveOS approval integration이 enabled일 때만 실패한 approval dispatch를 제한 횟수 내에서 재시도합니다. Ledger 또는 ArchiveOS가 내려가도 transaction/ledger 처리 자체는 rollback하지 않습니다.
 
-`GET /api/settlement-agency/summary`와 `GET /api/operations/summary`의 `balance`는 transaction processing, settlement agency, reconciliation, approval review 수익과 workforce/backlog/callback 비용, synthetic cash balance, margin, delay rate, negative profit streak을 제공합니다. 자세한 계산 방식은 [continuous-settlement-runtime.md](docs/continuous-settlement-runtime.md)를 참고합니다.
+`GET /api/settlement-agency/summary`와 `GET /api/operations/summary`의 `balance`는 transaction processing, settlement agency, reconciliation, approval review 수익과 실현 workforce 비용을 제공합니다. 미처리 재고 비용은 영업비용에 합산하지 않고 `backlogExposure`로 별도 노출하며, 공통 합산용 통화·기간·인식수익·실현비용 필드를 함께 제공합니다. 자세한 계산 방식은 [continuous-settlement-runtime.md](docs/continuous-settlement-runtime.md)를 참고합니다.
 
 ## 핵심 역할
 

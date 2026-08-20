@@ -7,10 +7,11 @@ Archive-Ledger는 승인 대기, 정산 지연, 대사 경고, callback 실패�
 | Ledger state | Runtime eventType | displayLabel |
 | --- | --- | --- |
 | `finance_transaction.status=APPROVAL_REQUIRED` | `APPROVAL_REQUIRED` | `승인 대기 거래 1건` |
+| forward-only policy auto-approved | `APPROVAL_APPROVED` | `자동 승인 완료 거래 1건` |
 | approval callback approved | `APPROVAL_APPROVED` | `승인 완료 거래 1건` |
 | approval callback rejected | `APPROVAL_REJECTED` | `승인 반려 거래 1건` |
 
-승인 필요 거래는 정산 대상에서 제외됩니다. `APPROVED` callback 이후에만 `SETTLEMENT_READY`로 전이되고, `REJECTED`는 계속 정산 제외 상태입니다.
+승인 필요 거래는 정산 대상에서 제외됩니다. 신규 ingest의 bounded Logistics 정책이 적용되거나 `APPROVED` callback을 받은 뒤에만 `SETTLEMENT_READY`로 전이되고, `REJECTED`는 계속 정산 제외 상태입니다. 자동 승인 정책은 과거 `REQUESTED` 행을 검색하거나 변경하지 않습니다.
 
 ## Settlement
 

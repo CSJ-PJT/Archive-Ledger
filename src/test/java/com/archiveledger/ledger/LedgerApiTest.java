@@ -1216,9 +1216,42 @@ class LedgerApiTest {
         mvc.perform(get("/api/settlement-agency/summary"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.payrollCost").value(210000.00))
+                .andExpect(jsonPath("$.totalCost").value(210000.00))
+                .andExpect(jsonPath("$.backlogExposure").value(Matchers.greaterThan(0)))
                 .andExpect(jsonPath("$.settlementBacklog").value(4))
                 .andExpect(jsonPath("$.approvalBacklog").value(2))
                 .andExpect(jsonPath("$.reconciliationBacklog").value(2));
+    }
+
+    @Test
+    void legacySnapshotBacklogStockIsNormalizedAtReadWithoutMutatingStoredHistory() throws Exception {
+        clearTablesForDeterministicReconciliation();
+        LocalDate workDate = LocalDate.now();
+        jdbc.update("""
+                insert into ledger_runtime_balance_snapshot(
+                    work_date,settlement_cycle_id,transaction_processing_revenue,settlement_agency_revenue,
+                    reconciliation_revenue,approval_review_revenue,workforce_cost,callback_failure_cost,
+                    operating_cost,operating_profit,operating_margin,cash_balance,transactions_received,
+                    transactions_processed,approval_backlog,settlement_backlog,reconciliation_backlog,callback_backlog,
+                    capacity_utilization,bottleneck_role,settlement_delay_rate,negative_profit_streak,calculated_at
+                ) values(?,null,100000,0,0,0,20000,1000,27000,73000,0.7300,73000,0,0,1,1,1,1,
+                         0.5000,'APPROVAL_REVIEWER',1.0000,4,?)
+                """, java.sql.Date.valueOf(workDate), java.sql.Timestamp.from(java.time.Instant.now()));
+
+        mvc.perform(get("/api/settlement-agency/summary"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.balance.operatingCost").value(20000))
+                .andExpect(jsonPath("$.balance.operatingProfit").value(80000))
+                .andExpect(jsonPath("$.balance.operatingMargin").value(0.8000))
+                .andExpect(jsonPath("$.balance.recognizedRevenue").value(100000))
+                .andExpect(jsonPath("$.balance.realizedOperatingCost").value(20000))
+                .andExpect(jsonPath("$.balance.backlogExposure").value(7000))
+                .andExpect(jsonPath("$.balance.negativeProfitStreak").value(0));
+
+        assertThat(jdbc.queryForObject("select operating_cost from ledger_runtime_balance_snapshot where work_date=?",
+                BigDecimal.class, java.sql.Date.valueOf(workDate))).isEqualByComparingTo("27000");
+        assertThat(jdbc.queryForObject("select backlog_exposure from ledger_runtime_balance_snapshot where work_date=?",
+                BigDecimal.class, java.sql.Date.valueOf(workDate))).isEqualByComparingTo("0");
     }
 
     @Test
@@ -1246,6 +1279,12 @@ class LedgerApiTest {
                 .andExpect(jsonPath("$.balance.settlementAgencyRevenue").exists())
                 .andExpect(jsonPath("$.balance.workforceCost").exists())
                 .andExpect(jsonPath("$.balance.callbackFailureCost").exists())
+                .andExpect(jsonPath("$.balance.backlogExposure").exists())
+                .andExpect(jsonPath("$.balance.currency").value("SYNTHETIC_KRW"))
+                .andExpect(jsonPath("$.balance.periodStart").value(workDate.toString()))
+                .andExpect(jsonPath("$.balance.periodEnd").value(workDate.toString()))
+                .andExpect(jsonPath("$.balance.recognizedRevenue").exists())
+                .andExpect(jsonPath("$.balance.realizedOperatingCost").exists())
                 .andExpect(jsonPath("$.balance.operatingProfit").exists())
                 .andExpect(jsonPath("$.balance.operatingMargin").exists())
                 .andExpect(jsonPath("$.balance.cashBalance").exists())
@@ -1258,7 +1297,8 @@ class LedgerApiTest {
                 .andExpect(jsonPath("$.balance.transactionsProcessed").value(0))
                 .andExpect(jsonPath("$.balance.settlementBacklog").value(45))
                 .andExpect(jsonPath("$.balance.capacityUtilization").exists())
-                .andExpect(jsonPath("$.balance.negativeProfitStreak").value(1));
+                .andExpect(jsonPath("$.balance.negativeProfitStreak").value(0))
+                .andExpect(jsonPath("$.economy.backlogExposure").exists());
     }
 
     @Test
@@ -1426,6 +1466,8 @@ class LedgerApiTest {
     }
 
     private void clearTablesForDeterministicReconciliation() {
+        jdbc.execute("delete from approval_policy_decision");
+        jdbc.execute("delete from auto_approval_daily_budget");
         jdbc.execute("delete from ledger_runtime_balance_snapshot");
         jdbc.execute("delete from ledger_workforce_allocation");
         jdbc.execute("delete from workforce_workday_result");

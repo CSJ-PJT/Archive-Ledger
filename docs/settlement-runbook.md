@@ -75,12 +75,14 @@ curl.exe http://localhost:18080/api/reconciliation/summary
 
 ## Approval Interaction
 
-Approval-required transactions are not settled until callback:
+Approval-required transactions are not settled until a policy decision or callback:
 
 ```text
 APPROVAL_REQUIRED --APPROVED--> SETTLEMENT_READY
 APPROVAL_REQUIRED --REJECTED--> REJECTED
 ```
+
+The optional auto-approval policy is forward-only: it runs only while a new Logistics event is ingested and never scans the existing queue. `SHADOW` records eligibility without changing state; `ENFORCE` applies only the strict low-risk amount-only policy and daily canary budget. Set `ARCHIVE_LEDGER_AUTO_APPROVAL_MODE=DISABLED` to stop new automatic decisions. Changing this mode does not rewrite historical requests.
 
 After an `APPROVED` callback, rerun settlement for the transaction's `occurred_at` date.
 

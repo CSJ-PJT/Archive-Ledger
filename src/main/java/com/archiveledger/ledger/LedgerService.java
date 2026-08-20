@@ -1,6 +1,8 @@
 package com.archiveledger.ledger;
 
 import com.archiveledger.ledger.approval.ArchiveOsApprovalClient;
+import com.archiveledger.ledger.approval.AutoApprovalCandidate;
+import com.archiveledger.ledger.approval.AutoApprovalService;
 import com.archiveledger.ledger.common.LedgerMetrics;
 import com.archiveledger.ledger.common.LedgerModels.*;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -36,6 +38,7 @@ public class LedgerService {
     private final JdbcTemplate jdbc;
     private final ObjectMapper mapper;
     private final ArchiveOsApprovalClient archiveOs;
+    private final AutoApprovalService autoApprovals;
     private final LedgerMetrics metrics;
     private final BigDecimal approvalThreshold;
     private final boolean runtimeAutoRunEnabled;
@@ -59,6 +62,7 @@ public class LedgerService {
     public LedgerService(JdbcTemplate jdbc,
                          ObjectMapper mapper,
                          ArchiveOsApprovalClient archiveOs,
+                         AutoApprovalService autoApprovals,
                          LedgerMetrics metrics,
                          @Value("${archive-ledger.policy.approval-threshold-krw:3000000}") BigDecimal approvalThreshold,
                          @Value("${archive.runtime.autorun.enabled:true}") boolean runtimeAutoRunEnabled,
@@ -66,6 +70,7 @@ public class LedgerService {
         this.jdbc = jdbc;
         this.mapper = mapper;
         this.archiveOs = archiveOs;
+        this.autoApprovals = autoApprovals;
         this.metrics = metrics;
         this.approvalThreshold = approvalThreshold;
         this.runtimeAutoRunEnabled = runtimeAutoRunEnabled;
@@ -723,6 +728,7 @@ public class LedgerService {
                 metrics.reconciliationBacklogCost(),
                 metrics.approvalBacklogCost(),
                 metrics.callbackFailureCost(),
+                metrics.backlogExposure(),
                 metrics.operatingCost(),
                 metrics.operatingProfit(),
                 metrics.transactionsProcessed(),
@@ -760,11 +766,12 @@ public class LedgerService {
         BigDecimal reconciliationCost = reconciliationDelayCost(reconciliationBacklog);
         BigDecimal approvalCost = approvalBacklogCost(approvalBacklog);
         BigDecimal callbackCost = callbackDelayCost(callbackBacklog);
-        BigDecimal totalCost = payroll.add(settlementCost).add(reconciliationCost).add(approvalCost).add(callbackCost);
+        BigDecimal backlogExposure = settlementCost.add(reconciliationCost).add(approvalCost).add(callbackCost);
+        BigDecimal operatingCost = payroll;
         return new AgencyMetrics(
                 transactionRevenue, settlementRevenue, reconciliationRevenue, approvalRevenue, totalRevenue,
-                payroll, settlementCost, reconciliationCost, approvalCost, callbackCost, totalCost,
-                totalRevenue.subtract(totalCost), transactionsProcessed, settlementCompleted, reconciliationProcessed,
+                payroll, settlementCost, reconciliationCost, approvalCost, callbackCost, backlogExposure, operatingCost,
+                totalRevenue.subtract(operatingCost), transactionsProcessed, settlementCompleted, reconciliationProcessed,
                 approvalReviewed, transactionsBacklog, settlementBacklog, reconciliationBacklog, approvalBacklog,
                 callbackBacklog, result == null ? BigDecimal.ZERO.setScale(4, RoundingMode.HALF_UP) : result.productivityScore(),
                 result == null ? "NONE" : value(result.bottleneckRole(), "NONE")
@@ -787,7 +794,7 @@ public class LedgerService {
                     update ledger_runtime_balance_snapshot
                     set settlement_cycle_id=?,transaction_processing_revenue=?,settlement_agency_revenue=?,
                         reconciliation_revenue=?,approval_review_revenue=?,workforce_cost=?,callback_failure_cost=?,
-                        operating_cost=?,operating_profit=?,operating_margin=?,cash_balance=?,transactions_received=?,
+                        backlog_exposure=?,operating_cost=?,operating_profit=?,operating_margin=?,cash_balance=?,transactions_received=?,
                         transactions_processed=?,approval_backlog=?,settlement_backlog=?,reconciliation_backlog=?,
                         callback_backlog=?,capacity_utilization=?,bottleneck_role=?,settlement_delay_rate=?,
                         negative_profit_streak=?,calculated_at=?
@@ -795,7 +802,7 @@ public class LedgerService {
                     """,
                     settlementCycleId, metrics.transactionRevenue(), metrics.settlementRevenue(),
                     metrics.reconciliationRevenue(), metrics.approvalRevenue(), metrics.payrollCost(), metrics.callbackFailureCost(),
-                    metrics.operatingCost(), metrics.operatingProfit(), margin, cashBalance, result.transactionsReceived(),
+                    metrics.backlogExposure(), metrics.operatingCost(), metrics.operatingProfit(), margin, cashBalance, result.transactionsReceived(),
                     metrics.transactionsProcessed(), metrics.approvalBacklog(), metrics.settlementBacklog(),
                     metrics.reconciliationBacklog(), metrics.callbackBacklog(), capacity.capacityUtilizationRate(),
                     metrics.bottleneckRole(), delayRate, negativeProfitStreak, ts(Instant.now()), Date.valueOf(result.workDate()));
@@ -806,14 +813,14 @@ public class LedgerService {
                 insert into ledger_runtime_balance_snapshot(
                     work_date,settlement_cycle_id,transaction_processing_revenue,settlement_agency_revenue,
                     reconciliation_revenue,approval_review_revenue,workforce_cost,callback_failure_cost,
-                    operating_cost,operating_profit,operating_margin,cash_balance,transactions_received,
+                    backlog_exposure,operating_cost,operating_profit,operating_margin,cash_balance,transactions_received,
                     transactions_processed,approval_backlog,settlement_backlog,reconciliation_backlog,callback_backlog,
                     capacity_utilization,bottleneck_role,settlement_delay_rate,negative_profit_streak,calculated_at
-                ) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 Date.valueOf(result.workDate()), settlementCycleId, metrics.transactionRevenue(), metrics.settlementRevenue(),
                 metrics.reconciliationRevenue(), metrics.approvalRevenue(), metrics.payrollCost(), metrics.callbackFailureCost(),
-                metrics.operatingCost(), metrics.operatingProfit(), margin, cashBalance, result.transactionsReceived(),
+                metrics.backlogExposure(), metrics.operatingCost(), metrics.operatingProfit(), margin, cashBalance, result.transactionsReceived(),
                 metrics.transactionsProcessed(), metrics.approvalBacklog(), metrics.settlementBacklog(),
                 metrics.reconciliationBacklog(), metrics.callbackBacklog(), capacity.capacityUtilizationRate(),
                 metrics.bottleneckRole(), delayRate, negativeProfitStreak, ts(Instant.now()));
@@ -850,6 +857,17 @@ public class LedgerService {
     }
 
     private SettlementBalanceSummary settlementBalanceRow(java.sql.ResultSet rs, int row) throws java.sql.SQLException {
+        LocalDate workDate = rs.getDate("work_date").toLocalDate();
+        BigDecimal recognizedRevenue = rs.getBigDecimal("transaction_processing_revenue")
+                .add(rs.getBigDecimal("settlement_agency_revenue"))
+                .add(rs.getBigDecimal("reconciliation_revenue"))
+                .add(rs.getBigDecimal("approval_review_revenue"));
+        BigDecimal realizedOperatingCost = rs.getBigDecimal("workforce_cost");
+        BigDecimal normalizedOperatingProfit = recognizedRevenue.subtract(realizedOperatingCost);
+        BigDecimal normalizedBacklogExposure = settlementBacklogCost(rs.getInt("settlement_backlog"))
+                .add(reconciliationDelayCost(rs.getInt("reconciliation_backlog")))
+                .add(approvalBacklogCost(rs.getInt("approval_backlog")))
+                .add(callbackDelayCost(rs.getInt("callback_backlog")));
         return new SettlementBalanceSummary(
                 true,
                 TARGET_LEDGER,
@@ -861,9 +879,9 @@ public class LedgerService {
                 rs.getBigDecimal("approval_review_revenue"),
                 rs.getBigDecimal("workforce_cost"),
                 rs.getBigDecimal("callback_failure_cost"),
-                rs.getBigDecimal("operating_cost"),
-                rs.getBigDecimal("operating_profit"),
-                rs.getBigDecimal("operating_margin"),
+                realizedOperatingCost,
+                normalizedOperatingProfit,
+                operatingMargin(normalizedOperatingProfit, recognizedRevenue),
                 rs.getBigDecimal("cash_balance"),
                 rs.getInt("transactions_received"),
                 rs.getInt("transactions_processed"),
@@ -874,8 +892,14 @@ public class LedgerService {
                 rs.getBigDecimal("capacity_utilization"),
                 value(rs.getString("bottleneck_role"), "NONE"),
                 rs.getBigDecimal("settlement_delay_rate"),
-                rs.getInt("negative_profit_streak"),
-                instant(rs.getTimestamp("calculated_at"))
+                normalizedOperatingProfit.compareTo(BigDecimal.ZERO) < 0 ? rs.getInt("negative_profit_streak") : 0,
+                instant(rs.getTimestamp("calculated_at")),
+                "SYNTHETIC_KRW",
+                workDate,
+                workDate,
+                recognizedRevenue,
+                realizedOperatingCost,
+                normalizedBacklogExposure
         );
     }
 
@@ -894,7 +918,8 @@ public class LedgerService {
                 result == null ? 0 : result.transactionsReceived(), metrics.transactionsProcessed(), metrics.approvalBacklog(),
                 metrics.settlementBacklog(), metrics.reconciliationBacklog(), metrics.callbackBacklog(), utilization,
                 metrics.bottleneckRole(), settlementDelayRate(metrics.settlementCompleted(), metrics.settlementBacklog()),
-                negativeProfitStreak, calculatedAt
+                negativeProfitStreak, calculatedAt,
+                "SYNTHETIC_KRW", workDate, workDate, metrics.totalRevenue(), metrics.operatingCost(), metrics.backlogExposure()
         );
     }
 
@@ -1063,39 +1088,58 @@ public class LedgerService {
                         ts(receivedAt)
                 );
 
-                try {
-                    Map<String, Object> metadata = new HashMap<>();
-                    metadata.put("sourceService", source);
-                    metadata.put("routePlanId", normalized.routePlanId());
-                    metadata.put("shipmentId", normalized.shipmentId());
-                    metadata.put("factoryId", normalized.factoryId());
-                    metadata.put("vendorId", normalized.vendorId());
-                    metadata.put("eventType", normalized.eventType());
-                    metadata.put("riskScore", normalized.riskScore());
-                    metadata.put("totalCost", normalized.amount());
-                    metadata.put("requiresColdChain", normalized.requiresColdChain());
-                    if (request.payload() != null) {
-                        metadata.put("orderId", request.payload().get("orderId"));
-                        metadata.put("paymentId", request.payload().get("paymentId"));
-                        metadata.put("customerId", request.payload().get("customerId"));
-                        metadata.put("returnId", request.payload().get("returnId"));
-                        metadata.put("claimId", request.payload().get("claimId"));
-                        metadata.put("customerType", request.payload().get("customerType"));
-                        metadata.put("simulationRunId", request.payload().get("simulationRunId"));
-                        metadata.put("settlementCycleId", request.payload().get("settlementCycleId"));
-                        metadata.put("correlationId", request.payload().get("correlationId"));
-                        metadata.put("causationId", request.payload().get("causationId"));
-                        metadata.put("hopCount", request.payload().get("hopCount"));
-                        metadata.put("maxHop", request.payload().get("maxHop"));
+                AutoApprovalService.Result autoApproval = autoApprovals.evaluateNewIngest(new AutoApprovalCandidate(
+                        approvalRequestId,
+                        transactionId,
+                        source,
+                        request.eventType(),
+                        normalized.transactionType(),
+                        normalized.amount(),
+                        normalized.currency(),
+                        normalized.riskScore(),
+                        request.payload() == null ? null : text(request.payload().get("severity")),
+                        normalized.approvalReason(),
+                        normalized.approvalRequired(),
+                        request.payload()
+                ));
+                if (autoApproval.applied()) {
+                    status = "SETTLEMENT_READY";
+                } else {
+                    try {
+                        Map<String, Object> metadata = new HashMap<>();
+                        metadata.put("sourceService", source);
+                        metadata.put("routePlanId", normalized.routePlanId());
+                        metadata.put("shipmentId", normalized.shipmentId());
+                        metadata.put("factoryId", normalized.factoryId());
+                        metadata.put("vendorId", normalized.vendorId());
+                        metadata.put("eventType", normalized.eventType());
+                        metadata.put("riskScore", normalized.riskScore());
+                        metadata.put("totalCost", normalized.amount());
+                        metadata.put("requiresColdChain", normalized.requiresColdChain());
+                        if (request.payload() != null) {
+                            metadata.put("orderId", request.payload().get("orderId"));
+                            metadata.put("paymentId", request.payload().get("paymentId"));
+                            metadata.put("customerId", request.payload().get("customerId"));
+                            metadata.put("returnId", request.payload().get("returnId"));
+                            metadata.put("claimId", request.payload().get("claimId"));
+                            metadata.put("customerType", request.payload().get("customerType"));
+                            metadata.put("simulationRunId", request.payload().get("simulationRunId"));
+                            metadata.put("settlementCycleId", request.payload().get("settlementCycleId"));
+                            metadata.put("correlationId", request.payload().get("correlationId"));
+                            metadata.put("causationId", request.payload().get("causationId"));
+                            metadata.put("hopCount", request.payload().get("hopCount"));
+                            metadata.put("maxHop", request.payload().get("maxHop"));
+                        }
+                        archiveOs.requestApproval(approvalRequestId, transactionId, normalized.amount(), normalized.currency(),
+                                normalized.reason(), metadata);
+                        audit(transactionId, "Archive-Ledger", "ARCHIVEOS_APPROVAL_REQUESTED", "approval_request",
+                                approvalRequestId, null, "REQUESTED",
+                                Map.of("archiveOsEnabled", archiveOs.enabled(), "sourceService", source,
+                                        "autoApprovalOutcome", autoApproval.outcome()));
+                    } catch (RuntimeException error) {
+                        audit(transactionId, "Archive-Ledger", "ARCHIVEOS_APPROVAL_DEGRADED", "approval_request",
+                                approvalRequestId, "REQUESTED", "REQUESTED", Map.of("error", error.getMessage(), "fallbackEvidence", evidence));
                     }
-                    archiveOs.requestApproval(approvalRequestId, transactionId, normalized.amount(), normalized.currency(),
-                            normalized.reason(), metadata);
-                    audit(transactionId, "Archive-Ledger", "ARCHIVEOS_APPROVAL_REQUESTED", "approval_request",
-                            approvalRequestId, null, "REQUESTED",
-                            Map.of("archiveOsEnabled", archiveOs.enabled(), "sourceService", source));
-                } catch (RuntimeException error) {
-                    audit(transactionId, "Archive-Ledger", "ARCHIVEOS_APPROVAL_DEGRADED", "approval_request",
-                            approvalRequestId, "REQUESTED", "REQUESTED", Map.of("error", error.getMessage(), "fallbackEvidence", evidence));
                 }
             }
 
@@ -1946,12 +1990,10 @@ public class LedgerService {
         SettlementBalanceSummary balance = agency.balance();
         RuntimeOutboxSummary outbox = new RuntimeOutboxSummary(0, 0, 0, 0);
         RuntimeEconomySummary economy = new RuntimeEconomySummary(
-                balance.transactionProcessingRevenue()
-                        .add(balance.settlementAgencyRevenue())
-                        .add(balance.reconciliationRevenue())
-                        .add(balance.approvalReviewRevenue()),
-                balance.operatingCost(),
-                balance.operatingProfit()
+                balance.recognizedRevenue(),
+                balance.realizedOperatingCost(),
+                balance.operatingProfit(),
+                balance.backlogExposure()
         );
         RuntimeWorkforceSummary runtimeWorkforce = new RuntimeWorkforceSummary(
                 workforce.assignedUnits(),
@@ -3218,6 +3260,7 @@ public class LedgerService {
             BigDecimal reconciliationBacklogCost,
             BigDecimal approvalBacklogCost,
             BigDecimal callbackFailureCost,
+            BigDecimal backlogExposure,
             BigDecimal operatingCost,
             BigDecimal operatingProfit,
             int transactionsProcessed,
