@@ -11,6 +11,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
@@ -489,6 +490,31 @@ class LedgerApiTest {
                 .andExpect(jsonPath("$[*].correlationId", Matchers.everyItem(Matchers.is(correlationId))))
                 .andExpect(jsonPath("$[*].eventType", Matchers.hasItems(
                         "APPROVAL_APPROVED", "SETTLEMENT_READY", "CALLBACK_COMPLETED")));
+    }
+
+    @Test
+    @Transactional
+    void bulkApprovalTransitionsRequestAndTransactionTogetherWithAudit() {
+        String transactionId = "TX-BULK-" + nextId("TX");
+        String approvalId = "APR-BULK-" + nextId("APR");
+        jdbc.update("""
+                insert into finance_transaction(
+                  transaction_id,source_event_id,idempotency_key,transaction_type,amount,currency,status,
+                  approval_required,approval_request_id,occurred_at,created_at,updated_at)
+                values(?,?,?,?,?,'KRW','APPROVAL_REQUIRED',true,?,current_timestamp,current_timestamp,current_timestamp)
+                """, transactionId, "EVT-" + transactionId, "IDEMP-" + transactionId, "TEST_APPROVAL", new BigDecimal("1000"), approvalId);
+        jdbc.update("""
+                insert into approval_request(
+                  approval_request_id,transaction_id,requested_to,status,amount,reason,policy_evidence,requested_at)
+                values(?,?,'ArchiveOS','REQUESTED',1000,'test','{}',current_timestamp)
+                """, approvalId, transactionId);
+
+        Map<String, Object> result = ledger.approveAllRequested(5_000, "test-bulk-agent");
+
+        assertThat(((Number) result.get("approved")).intValue()).isGreaterThanOrEqualTo(1);
+        assertThat(jdbc.queryForObject("select status from approval_request where approval_request_id=?", String.class, approvalId)).isEqualTo("APPROVED");
+        assertThat(jdbc.queryForObject("select status from finance_transaction where transaction_id=?", String.class, transactionId)).isEqualTo("SETTLEMENT_READY");
+        assertThat(count("select count(*) from audit_log where target_id=? and action='BULK_APPROVAL_APPLIED'", approvalId)).isEqualTo(1);
     }
 
     @Test

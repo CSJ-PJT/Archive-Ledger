@@ -7,6 +7,7 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import java.time.LocalDate;
+import java.util.Map;
 
 @Component
 public class LedgerScheduledJobs {
@@ -16,6 +17,8 @@ public class LedgerScheduledJobs {
     private final boolean enabled;
     private final boolean settlementEnabled;
     private final boolean reconciliationEnabled;
+    private final boolean autoApproveAllEnabled;
+    private final int autoApprovalBatchSize;
     private final long settlementDateOffsetDays;
     private final long reconciliationDateOffsetDays;
 
@@ -23,12 +26,16 @@ public class LedgerScheduledJobs {
                                @Value("${archive-ledger.scheduler.enabled:false}") boolean enabled,
                                @Value("${archive-ledger.scheduler.settlement-enabled:true}") boolean settlementEnabled,
                                @Value("${archive-ledger.scheduler.reconciliation-enabled:true}") boolean reconciliationEnabled,
+                               @Value("${archive-ledger.scheduler.auto-approve-all-enabled:false}") boolean autoApproveAllEnabled,
+                               @Value("${archive-ledger.scheduler.auto-approval-batch-size:1000}") int autoApprovalBatchSize,
                                @Value("${archive-ledger.scheduler.settlement-date-offset-days:0}") long settlementDateOffsetDays,
                                @Value("${archive-ledger.scheduler.reconciliation-date-offset-days:0}") long reconciliationDateOffsetDays) {
         this.ledger = ledger;
         this.enabled = enabled;
         this.settlementEnabled = settlementEnabled;
         this.reconciliationEnabled = reconciliationEnabled;
+        this.autoApproveAllEnabled = autoApproveAllEnabled;
+        this.autoApprovalBatchSize = Math.max(1, Math.min(autoApprovalBatchSize, 5_000));
         this.settlementDateOffsetDays = settlementDateOffsetDays;
         this.reconciliationDateOffsetDays = reconciliationDateOffsetDays;
     }
@@ -40,6 +47,18 @@ public class LedgerScheduledJobs {
     public void runOperationalCycle() {
         if (!enabled) {
             return;
+        }
+
+        if (autoApproveAllEnabled) {
+            try {
+                Map<String, Object> result = ledger.approveAllRequested(autoApprovalBatchSize, "archive-ledger-approval-agent");
+                if (((Number) result.getOrDefault("approved", 0)).intValue() > 0) {
+                    log.info("Scheduled approval agent approved {} requests; {} remain", result.get("approved"), result.get("remaining"));
+                }
+            } catch (RuntimeException error) {
+                log.warn("Scheduled approval agent failed: {}", error.getMessage());
+                return;
+            }
         }
 
         if (settlementEnabled) {

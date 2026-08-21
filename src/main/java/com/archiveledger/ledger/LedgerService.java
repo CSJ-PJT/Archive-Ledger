@@ -1212,6 +1212,80 @@ public class LedgerService {
         return Map.of("transactionId", request.transactionId(), "previousStatus", before, "status", next, "duplicate", false);
     }
 
+    /** Auditable bounded transition for persisted backlog; this does not run settlement. */
+    @Transactional
+    public Map<String, Object> approveAllRequested(int limit, String requestedBy) {
+        int safeLimit = Math.max(1, Math.min(limit, 5_000));
+        String actor = value(requestedBy, "archive-ledger-approval-agent");
+        Instant now = Instant.now();
+        List<BulkApprovalCandidate> candidates = jdbc.query("""
+                select ar.approval_request_id, ar.transaction_id, ar.amount
+                  from approval_request ar
+                  join finance_transaction ft
+                    on ft.transaction_id = ar.transaction_id
+                   and ft.approval_request_id = ar.approval_request_id
+                 where ar.status = 'REQUESTED'
+                   and ft.status = 'APPROVAL_REQUIRED'
+                 order by ar.requested_at asc, ar.id asc
+                 limit ?
+                 for update of ar, ft skip locked
+                """, (rs, row) -> new BulkApprovalCandidate(
+                rs.getString("approval_request_id"), rs.getString("transaction_id"), rs.getBigDecimal("amount")), safeLimit);
+        if (candidates.isEmpty()) {
+            return Map.of("approved", 0, "remaining", count("select count(*) from approval_request where status='REQUESTED'"),
+                    "actor", actor, "settlementExecuted", false);
+        }
+
+        int approvalUpdated = batchCount(jdbc.batchUpdate("""
+                update approval_request
+                   set status='APPROVED', decided_at=?, decided_by=?
+                 where approval_request_id=? and transaction_id=? and status='REQUESTED'
+                """, candidates, 500, (statement, candidate) -> {
+            statement.setTimestamp(1, ts(now));
+            statement.setString(2, actor);
+            statement.setString(3, candidate.approvalRequestId());
+            statement.setString(4, candidate.transactionId());
+        }));
+        int transactionUpdated = batchCount(jdbc.batchUpdate("""
+                update finance_transaction
+                   set status='SETTLEMENT_READY', updated_at=?
+                 where transaction_id=? and approval_request_id=? and status='APPROVAL_REQUIRED'
+                """, candidates, 500, (statement, candidate) -> {
+            statement.setTimestamp(1, ts(now));
+            statement.setString(2, candidate.transactionId());
+            statement.setString(3, candidate.approvalRequestId());
+        }));
+        if (approvalUpdated != candidates.size() || transactionUpdated != candidates.size()) {
+            throw new IllegalStateException("Bulk approval state transition did not update every locked request and transaction.");
+        }
+
+        jdbc.batchUpdate("""
+                insert into audit_log(trace_id,actor,action,target_type,target_id,before_status,after_status,detail,created_at)
+                values(?,?,?,?,?,?,?,?,?)
+                """, candidates, 500, (statement, candidate) -> {
+            statement.setString(1, candidate.transactionId());
+            statement.setString(2, actor);
+            statement.setString(3, "BULK_APPROVAL_APPLIED");
+            statement.setString(4, "approval_request");
+            statement.setString(5, candidate.approvalRequestId());
+            statement.setString(6, "REQUESTED");
+            statement.setString(7, "APPROVED");
+            statement.setString(8, write(Map.of("amount", candidate.amount(), "settlementExecuted", false, "mode", "APPROVE_ALL")));
+            statement.setTimestamp(9, ts(now));
+        });
+        return Map.of("approved", candidates.size(),
+                "remaining", count("select count(*) from approval_request where status='REQUESTED'"),
+                "actor", actor, "settlementExecuted", false);
+    }
+
+    private int batchCount(int[][] batches) {
+        int total = 0;
+        for (int[] batch : batches) for (int value : batch) if (value > 0) total += value;
+        return total;
+    }
+
+    private record BulkApprovalCandidate(String approvalRequestId, String transactionId, BigDecimal amount) {}
+
     private int retryPendingApprovalDispatches(int requestedAttempts) {
         if (!archiveOs.enabled() || requestedAttempts <= 0 || callbackRetryLimit == 0) {
             return 0;

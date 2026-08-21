@@ -198,6 +198,11 @@ public class LedgerController {
         return ledger.approvalCallback(request);
     }
 
+    @PostMapping("/approvals/approve-all")
+    Map<String, Object> approveAll(@RequestParam(defaultValue = "5000") int limit) {
+        return ledger.approveAllRequested(limit, "archive-ledger-admin-batch");
+    }
+
     @GetMapping("/operations/summary")
     OperationsSummary operationsSummary() {
         return ledger.operationsSummary();

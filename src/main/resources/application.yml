@@ -27,6 +27,8 @@ archive-ledger:
     enabled: ${ARCHIVE_LEDGER_SCHEDULER_ENABLED:false}
     settlement-enabled: ${ARCHIVE_LEDGER_SETTLEMENT_SCHEDULER_ENABLED:true}
     reconciliation-enabled: ${ARCHIVE_LEDGER_RECONCILIATION_SCHEDULER_ENABLED:true}
+    auto-approve-all-enabled: ${ARCHIVE_LEDGER_AUTO_APPROVE_ALL_ENABLED:false}
+    auto-approval-batch-size: ${ARCHIVE_LEDGER_AUTO_APPROVAL_BATCH_SIZE:1000}
     fixed-delay-ms: ${ARCHIVE_LEDGER_SCHEDULER_FIXED_DELAY_MS:60000}
     initial-delay-ms: ${ARCHIVE_LEDGER_SCHEDULER_INITIAL_DELAY_MS:15000}
     settlement-date-offset-days: ${ARCHIVE_LEDGER_SETTLEMENT_DATE_OFFSET_DAYS:0}
