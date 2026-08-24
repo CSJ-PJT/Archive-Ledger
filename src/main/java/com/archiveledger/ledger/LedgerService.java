@@ -831,32 +831,95 @@ public class LedgerService {
     }
 
     private SettlementBalanceSummary settlementBalanceSummary() {
+        LocalDate workDate = LocalDate.now();
         List<SettlementBalanceSummary> snapshots = jdbc.query("""
                 select * from ledger_runtime_balance_snapshot
-                order by case when
-                    transaction_processing_revenue <> 0 or settlement_agency_revenue <> 0 or
-                    reconciliation_revenue <> 0 or approval_review_revenue <> 0 or
-                    operating_cost <> 0 or operating_profit <> 0
-                    then 0 else 1 end,
-                    work_date desc, calculated_at desc
+                where work_date=?
+                order by calculated_at desc
                 limit 1
-                """, this::settlementBalanceRow);
+                """, this::settlementBalanceRow, Date.valueOf(workDate));
         if (!snapshots.isEmpty()) {
             return snapshots.get(0);
         }
-        WorkforceWorkdayResult latest = latestWorkdayResult().orElse(null);
-        AgencyMetrics metrics = agencyMetrics(latest);
-        BigDecimal utilization = latest == null ? BigDecimal.ZERO.setScale(4, RoundingMode.HALF_UP)
-                : workforceSummary(latest.workDate(), "ArchiveOS").capacityUtilizationRate();
-        return balanceFromMetrics(
-                latest == null ? null : latest.workDate(),
-                latest == null ? null : latestSettlementCycleId(latest.workDate()),
-                latest,
-                metrics,
-                utilization,
-                metrics.operatingProfit(),
-                metrics.operatingProfit().compareTo(BigDecimal.ZERO) < 0 ? 1 : 0,
-                Instant.now()
+        return currentDayBalanceSummary(workDate);
+    }
+
+    /**
+     * Read-only current-day finance fallback for deployments where the optional workday snapshot scheduler is paused.
+     * Revenue is derived from persisted, completed Ledger work and the same unit tariffs used by workday snapshots.
+     */
+    private SettlementBalanceSummary currentDayBalanceSummary(LocalDate workDate) {
+        Date day = Date.valueOf(workDate);
+        int transactionsReceived = count("select count(*) from received_event where cast(received_at as date)=?", day);
+        int transactionsProcessed = count("select count(*) from received_event where cast(received_at as date)=? and processing_status='PROCESSED'", day);
+        int transactionsBacklog = Math.max(0, transactionsReceived - transactionsProcessed);
+        int settlementCompleted = count("select count(distinct transaction_id) from settlement_detail where cast(created_at as date)=? and status='SETTLED'", day);
+        int approvalReviewed = count("select count(*) from approval_request where cast(decided_at as date)=? and status in ('APPROVED','REJECTED')", day);
+        int reconciliationProcessed = count("select count(*) from reconciliation_result where reconciliation_date=? and status='OK'", day);
+        int approvalBacklog = count("select count(*) from finance_transaction where status='APPROVAL_REQUIRED'");
+        int settlementBacklog = count("select count(*) from finance_transaction where status='SETTLEMENT_READY'");
+        int reconciliationBacklog = count("select coalesce((select mismatch_count from reconciliation_result where reconciliation_date=? order by created_at desc limit 1),0)", day);
+        int callbackBacklog = count("select count(*) from approval_request where status='REQUESTED'");
+        int callbackFailures = count("select count(*) from audit_log where action='ARCHIVEOS_APPROVAL_DEGRADED' and cast(created_at as date)=?", day);
+
+        BigDecimal transactionRevenue = BigDecimal.valueOf(transactionsProcessed).multiply(new BigDecimal("120"));
+        BigDecimal settlementRevenue = BigDecimal.valueOf(settlementCompleted).multiply(new BigDecimal("700"));
+        BigDecimal reconciliationRevenue = BigDecimal.valueOf(reconciliationProcessed).multiply(new BigDecimal("500"));
+        BigDecimal approvalRevenue = BigDecimal.valueOf(approvalReviewed).multiply(new BigDecimal("900"));
+        BigDecimal recognizedRevenue = transactionRevenue.add(settlementRevenue).add(reconciliationRevenue).add(approvalRevenue);
+        BigDecimal workforceCost = jdbc.query("""
+                select coalesce(sum(allocated_headcount * wage_per_day),0)
+                from ledger_workforce_allocation
+                where work_date=? and status='ACTIVE'
+                """, rs -> rs.next() ? rs.getBigDecimal(1) : BigDecimal.ZERO, day);
+        BigDecimal realizedOperatingCost = workforceCost == null ? BigDecimal.ZERO : workforceCost;
+        BigDecimal operatingProfit = recognizedRevenue.subtract(realizedOperatingCost);
+        BigDecimal backlogExposure = settlementBacklogCost(settlementBacklog)
+                .add(reconciliationDelayCost(reconciliationBacklog))
+                .add(approvalBacklogCost(approvalBacklog))
+                .add(callbackDelayCost(callbackBacklog));
+        int totalObserved = transactionsReceived + settlementCompleted + approvalReviewed + reconciliationProcessed;
+        int totalCompleted = transactionsProcessed + settlementCompleted + approvalReviewed + reconciliationProcessed;
+        BigDecimal capacityUtilization = totalObserved == 0
+                ? BigDecimal.ZERO.setScale(4, RoundingMode.HALF_UP)
+                : BigDecimal.valueOf(Math.min(totalCompleted, totalObserved))
+                .divide(BigDecimal.valueOf(totalObserved), 4, RoundingMode.HALF_UP);
+        boolean available = totalCompleted > 0 || realizedOperatingCost.signum() > 0;
+        int negativeProfitStreak = operatingProfit.signum() < 0 ? previousNegativeProfitStreak(workDate) + 1 : 0;
+        String bottleneck = value(bottleneckRole(transactionsBacklog, settlementBacklog, reconciliationBacklog, approvalBacklog, callbackBacklog), "NONE");
+
+        return new SettlementBalanceSummary(
+                available,
+                TARGET_LEDGER,
+                "WORKDAY",
+                latestSettlementCycleId(workDate),
+                transactionRevenue,
+                settlementRevenue,
+                reconciliationRevenue,
+                approvalRevenue,
+                workforceCost,
+                callbackDelayCost(callbackFailures),
+                realizedOperatingCost,
+                operatingProfit,
+                operatingMargin(operatingProfit, recognizedRevenue),
+                previousCashBalance(workDate).add(operatingProfit),
+                transactionsReceived,
+                transactionsProcessed,
+                approvalBacklog,
+                settlementBacklog,
+                reconciliationBacklog,
+                callbackBacklog,
+                capacityUtilization,
+                bottleneck,
+                settlementDelayRate(settlementCompleted, settlementBacklog),
+                negativeProfitStreak,
+                Instant.now(),
+                "SYNTHETIC_KRW",
+                workDate,
+                workDate,
+                recognizedRevenue,
+                realizedOperatingCost,
+                backlogExposure
         );
     }
 

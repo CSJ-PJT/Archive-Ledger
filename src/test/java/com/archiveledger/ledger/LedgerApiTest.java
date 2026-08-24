@@ -1424,6 +1424,33 @@ class LedgerApiTest {
     }
 
     @Test
+    void currentDayPersistedWorkProducesFinanceWhenTheSnapshotSchedulerIsPaused() throws Exception {
+        clearTablesForDeterministicReconciliation();
+        LocalDate workDate = LocalDate.now();
+        String eventId = logisticsEventId().replace("LG", "MK");
+        mvc.perform(post("/api/events/market").contentType(MediaType.APPLICATION_JSON).content(
+                        mapper.writeValueAsString(marketEvent("Archive-Market", eventId,
+                                logisticsIdempotency().replace("LG", "MK"), "SALES_REVENUE_CONFIRMED", Map.of(
+                                        "orderId", "ORDER-CURRENT-BALANCE-" + nextId("ORD"),
+                                        "amount", 120_000L,
+                                        "currency", "KRW",
+                                        "settlementCycleId", "CYCLE-CURRENT-BALANCE",
+                                        "correlationId", "CORR-CURRENT-BALANCE-" + nextId("CORR")
+                                )))))
+                .andExpect(status().isOk());
+        jdbc.execute("delete from ledger_runtime_balance_snapshot");
+
+        mvc.perform(get("/api/operations/summary"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.balance.available").value(true))
+                .andExpect(jsonPath("$.balance.calculationScope").value("WORKDAY"))
+                .andExpect(jsonPath("$.balance.periodStart").value(workDate.toString()))
+                .andExpect(jsonPath("$.balance.periodEnd").value(workDate.toString()))
+                .andExpect(jsonPath("$.balance.recognizedRevenue", Matchers.greaterThan(0)))
+                .andExpect(jsonPath("$.balance.transactionsProcessed", Matchers.greaterThan(0)));
+    }
+
+    @Test
     void autonomousTickLimitsSettlementByCapacityAndExposesBalanceMetrics() throws Exception {
         clearTablesForDeterministicReconciliation();
         LocalDate workDate = LocalDate.now();
