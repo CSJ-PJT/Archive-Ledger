@@ -1215,6 +1215,28 @@ class LedgerApiTest {
     }
 
     @Test
+    void runtimeBacklogExcludesRetainedTerminalFailuresOlderThanTwentyFourHours() {
+        clearTablesForDeterministicReconciliation();
+        String eventId = "EVT-HISTORICAL-FAILED-" + nextId("EVT");
+        insertReceivedEvent(LocalDate.now().minusDays(2), eventId);
+        jdbc.update("update received_event set processing_status='FAILED', failure_reason='retained history' where event_id=?", eventId);
+
+        var status = ledger.runtimeStatus();
+
+        assertThat(status.backlogCount()).isZero();
+        assertThat(status.oldestBacklogAgeSeconds()).isZero();
+    }
+
+    @Test
+    void runtimeBacklogCountsApprovalTransactionAndRequestAsOneUnitOfWork() {
+        clearTablesForDeterministicReconciliation();
+        insertSyntheticTransactions(LocalDate.now(), "APPROVAL_REQUIRED", 1);
+        insertApprovalRequests(LocalDate.now(), 1);
+
+        assertThat(ledger.runtimeStatus().backlogCount()).isEqualTo(1);
+    }
+
+    @Test
     void runtimeEventsExposeRuntimeMeshHeadersAndSupportCursorPolling() throws Exception {
         clearTablesForDeterministicReconciliation();
         String eventId = logisticsEventId().replace("LG", "MK");

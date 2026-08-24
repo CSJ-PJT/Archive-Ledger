@@ -555,17 +555,17 @@ public class LedgerService {
     }
 
     private int currentRuntimeBacklog() {
+        Timestamp currentFailureCutoff = ts(Instant.now().minus(Duration.ofHours(24)));
         return count("select count(*) from finance_transaction where status in ('APPROVAL_REQUIRED','SETTLEMENT_READY')")
-                + count("select count(*) from received_event where processing_status='FAILED'")
-                + count("select count(*) from approval_request where status='REQUESTED'");
+                + count("select count(*) from received_event where processing_status='FAILED' and received_at >= ?", currentFailureCutoff);
     }
 
     private long oldestRuntimeBacklogAgeSeconds() {
         Instant oldest = null;
         List<Instant> candidates = new ArrayList<>();
         candidates.add(queryInstant("select min(created_at) from finance_transaction where status in ('APPROVAL_REQUIRED','SETTLEMENT_READY')"));
-        candidates.add(queryInstant("select min(received_at) from received_event where processing_status='FAILED'"));
-        candidates.add(queryInstant("select min(requested_at) from approval_request where status='REQUESTED'"));
+        candidates.add(queryInstant("select min(received_at) from received_event where processing_status='FAILED' and received_at >= ?",
+                ts(Instant.now().minus(Duration.ofHours(24)))));
         for (Instant candidate : candidates) {
             if (candidate != null && (oldest == null || candidate.isBefore(oldest))) {
                 oldest = candidate;
@@ -574,8 +574,8 @@ public class LedgerService {
         return oldest == null ? 0 : Math.max(0, Duration.between(oldest, Instant.now()).toSeconds());
     }
 
-    private Instant queryInstant(String sql) {
-        return jdbc.query(sql, rs -> rs.next() ? instant(rs.getTimestamp(1)) : null);
+    private Instant queryInstant(String sql, Object... args) {
+        return jdbc.query(sql, rs -> rs.next() ? instant(rs.getTimestamp(1)) : null, args);
     }
 
     private String latestRuntimeCursor() {
