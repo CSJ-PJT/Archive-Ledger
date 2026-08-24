@@ -1385,7 +1385,7 @@ class LedgerApiTest {
         mvc.perform(get("/api/settlement-agency/summary"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.payrollCost").value(210000.00))
-                .andExpect(jsonPath("$.totalCost").value(210000.00))
+                .andExpect(jsonPath("$.totalCost").value(Matchers.greaterThan(210000.0), Double.class))
                 .andExpect(jsonPath("$.backlogExposure").value(Matchers.greaterThan(0)))
                 .andExpect(jsonPath("$.settlementBacklog").value(4))
                 .andExpect(jsonPath("$.approvalBacklog").value(2))
@@ -1447,6 +1447,8 @@ class LedgerApiTest {
                 .andExpect(jsonPath("$.balance.periodStart").value(workDate.toString()))
                 .andExpect(jsonPath("$.balance.periodEnd").value(workDate.toString()))
                 .andExpect(jsonPath("$.balance.recognizedRevenue", Matchers.greaterThan(0)))
+                .andExpect(jsonPath("$.balance.realizedOperatingCost").value(Matchers.greaterThan(0.0), Double.class))
+                .andExpect(jsonPath("$.balance.operatingMargin").value(Matchers.lessThan(1.0), Double.class))
                 .andExpect(jsonPath("$.balance.transactionsProcessed", Matchers.greaterThan(0)));
     }
 

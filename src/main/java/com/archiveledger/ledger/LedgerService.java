@@ -59,6 +59,16 @@ public class LedgerService {
     private static final int MAX_BULK_EVENTS = 1_000;
     private static final int LEDGER_BASELINE_DAILY_CAPACITY = 500;
     private static final String TARGET_LEDGER = "Archive-Ledger";
+    private static final BigDecimal TRANSACTION_REVENUE_PER_UNIT = new BigDecimal("120");
+    private static final BigDecimal SETTLEMENT_REVENUE_PER_UNIT = new BigDecimal("700");
+    private static final BigDecimal RECONCILIATION_REVENUE_PER_UNIT = new BigDecimal("500");
+    private static final BigDecimal APPROVAL_REVENUE_PER_UNIT = new BigDecimal("900");
+    private static final BigDecimal TRANSACTION_COST_PER_UNIT = new BigDecimal("110");
+    private static final BigDecimal SETTLEMENT_COST_PER_UNIT = new BigDecimal("644");
+    private static final BigDecimal RECONCILIATION_COST_PER_UNIT = new BigDecimal("460");
+    private static final BigDecimal APPROVAL_COST_PER_UNIT = new BigDecimal("828");
+    private static final BigDecimal DAILY_INFRA_COST = new BigDecimal("950000");
+    private static final int DAILY_INFRA_COST_MINIMUM_ACTIVITY = 1_000;
 
     public LedgerService(JdbcTemplate jdbc,
                          ObjectMapper mapper,
@@ -716,6 +726,23 @@ public class LedgerService {
         return BigDecimal.valueOf(backlog).multiply(new BigDecimal("1000"));
     }
 
+    private BigDecimal ledgerOperatingCost(int transactionsProcessed, int settlementCompleted,
+                                           int reconciliationProcessed, int approvalReviewed,
+                                           BigDecimal workforceCost) {
+        int completedWork = Math.max(0, transactionsProcessed)
+                + Math.max(0, settlementCompleted)
+                + Math.max(0, reconciliationProcessed)
+                + Math.max(0, approvalReviewed);
+        BigDecimal variableCost = BigDecimal.valueOf(Math.max(0, transactionsProcessed)).multiply(TRANSACTION_COST_PER_UNIT)
+                .add(BigDecimal.valueOf(Math.max(0, settlementCompleted)).multiply(SETTLEMENT_COST_PER_UNIT))
+                .add(BigDecimal.valueOf(Math.max(0, reconciliationProcessed)).multiply(RECONCILIATION_COST_PER_UNIT))
+                .add(BigDecimal.valueOf(Math.max(0, approvalReviewed)).multiply(APPROVAL_COST_PER_UNIT));
+        return (workforceCost == null ? BigDecimal.ZERO : workforceCost)
+                .add(variableCost)
+                .add(completedWork >= DAILY_INFRA_COST_MINIMUM_ACTIVITY ? DAILY_INFRA_COST : BigDecimal.ZERO)
+                .setScale(2, RoundingMode.HALF_UP);
+    }
+
     public SettlementAgencySummary settlementAgencySummary() {
         WorkforceWorkdayResult latest = latestWorkdayResult().orElse(null);
         AgencyMetrics metrics = agencyMetrics(latest);
@@ -760,10 +787,10 @@ public class LedgerService {
         int reconciliationBacklog = result == null ? 0 : result.reconciliationBacklog();
         int approvalBacklog = result == null ? 0 : result.approvalBacklog();
         int callbackBacklog = result == null ? 0 : result.callbackBacklog();
-        BigDecimal transactionRevenue = BigDecimal.valueOf(transactionsProcessed).multiply(new BigDecimal("120"));
-        BigDecimal settlementRevenue = BigDecimal.valueOf(settlementCompleted).multiply(new BigDecimal("700"));
-        BigDecimal reconciliationRevenue = BigDecimal.valueOf(reconciliationProcessed).multiply(new BigDecimal("500"));
-        BigDecimal approvalRevenue = BigDecimal.valueOf(approvalReviewed).multiply(new BigDecimal("900"));
+        BigDecimal transactionRevenue = BigDecimal.valueOf(transactionsProcessed).multiply(TRANSACTION_REVENUE_PER_UNIT);
+        BigDecimal settlementRevenue = BigDecimal.valueOf(settlementCompleted).multiply(SETTLEMENT_REVENUE_PER_UNIT);
+        BigDecimal reconciliationRevenue = BigDecimal.valueOf(reconciliationProcessed).multiply(RECONCILIATION_REVENUE_PER_UNIT);
+        BigDecimal approvalRevenue = BigDecimal.valueOf(approvalReviewed).multiply(APPROVAL_REVENUE_PER_UNIT);
         BigDecimal totalRevenue = transactionRevenue.add(settlementRevenue).add(reconciliationRevenue).add(approvalRevenue);
         BigDecimal payroll = result == null ? BigDecimal.ZERO : result.payrollCost();
         BigDecimal settlementCost = settlementBacklogCost(settlementBacklog);
@@ -771,7 +798,8 @@ public class LedgerService {
         BigDecimal approvalCost = approvalBacklogCost(approvalBacklog);
         BigDecimal callbackCost = callbackDelayCost(callbackBacklog);
         BigDecimal backlogExposure = settlementCost.add(reconciliationCost).add(approvalCost).add(callbackCost);
-        BigDecimal operatingCost = payroll;
+        BigDecimal operatingCost = ledgerOperatingCost(transactionsProcessed, settlementCompleted,
+                reconciliationProcessed, approvalReviewed, payroll);
         return new AgencyMetrics(
                 transactionRevenue, settlementRevenue, reconciliationRevenue, approvalRevenue, totalRevenue,
                 payroll, settlementCost, reconciliationCost, approvalCost, callbackCost, backlogExposure, operatingCost,
@@ -862,17 +890,18 @@ public class LedgerService {
         int callbackBacklog = count("select count(*) from approval_request where status='REQUESTED'");
         int callbackFailures = count("select count(*) from audit_log where action='ARCHIVEOS_APPROVAL_DEGRADED' and cast(created_at as date)=?", day);
 
-        BigDecimal transactionRevenue = BigDecimal.valueOf(transactionsProcessed).multiply(new BigDecimal("120"));
-        BigDecimal settlementRevenue = BigDecimal.valueOf(settlementCompleted).multiply(new BigDecimal("700"));
-        BigDecimal reconciliationRevenue = BigDecimal.valueOf(reconciliationProcessed).multiply(new BigDecimal("500"));
-        BigDecimal approvalRevenue = BigDecimal.valueOf(approvalReviewed).multiply(new BigDecimal("900"));
+        BigDecimal transactionRevenue = BigDecimal.valueOf(transactionsProcessed).multiply(TRANSACTION_REVENUE_PER_UNIT);
+        BigDecimal settlementRevenue = BigDecimal.valueOf(settlementCompleted).multiply(SETTLEMENT_REVENUE_PER_UNIT);
+        BigDecimal reconciliationRevenue = BigDecimal.valueOf(reconciliationProcessed).multiply(RECONCILIATION_REVENUE_PER_UNIT);
+        BigDecimal approvalRevenue = BigDecimal.valueOf(approvalReviewed).multiply(APPROVAL_REVENUE_PER_UNIT);
         BigDecimal recognizedRevenue = transactionRevenue.add(settlementRevenue).add(reconciliationRevenue).add(approvalRevenue);
         BigDecimal workforceCost = jdbc.query("""
                 select coalesce(sum(allocated_headcount * wage_per_day),0)
                 from ledger_workforce_allocation
                 where work_date=? and status='ACTIVE'
                 """, rs -> rs.next() ? rs.getBigDecimal(1) : BigDecimal.ZERO, day);
-        BigDecimal realizedOperatingCost = workforceCost == null ? BigDecimal.ZERO : workforceCost;
+        BigDecimal realizedOperatingCost = ledgerOperatingCost(transactionsProcessed, settlementCompleted,
+                reconciliationProcessed, approvalReviewed, workforceCost);
         BigDecimal operatingProfit = recognizedRevenue.subtract(realizedOperatingCost);
         BigDecimal backlogExposure = settlementBacklogCost(settlementBacklog)
                 .add(reconciliationDelayCost(reconciliationBacklog))
@@ -929,7 +958,13 @@ public class LedgerService {
                 .add(rs.getBigDecimal("settlement_agency_revenue"))
                 .add(rs.getBigDecimal("reconciliation_revenue"))
                 .add(rs.getBigDecimal("approval_review_revenue"));
-        BigDecimal realizedOperatingCost = rs.getBigDecimal("workforce_cost");
+        int transactionsProcessed = rs.getInt("transactions_processed");
+        Date day = Date.valueOf(workDate);
+        int settlementCompleted = count("select count(distinct transaction_id) from settlement_detail where cast(created_at as date)=? and status='SETTLED'", day);
+        int approvalReviewed = count("select count(*) from approval_request where cast(decided_at as date)=? and status in ('APPROVED','REJECTED')", day);
+        int reconciliationProcessed = count("select count(*) from reconciliation_result where reconciliation_date=? and status='OK'", day);
+        BigDecimal realizedOperatingCost = ledgerOperatingCost(transactionsProcessed, settlementCompleted,
+                reconciliationProcessed, approvalReviewed, rs.getBigDecimal("workforce_cost"));
         BigDecimal normalizedOperatingProfit = recognizedRevenue.subtract(realizedOperatingCost);
         BigDecimal normalizedBacklogExposure = settlementBacklogCost(rs.getInt("settlement_backlog"))
                 .add(reconciliationDelayCost(rs.getInt("reconciliation_backlog")))
