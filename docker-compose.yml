@@ -1,3 +1,5 @@
+name: archive-ledger
+
 services:
   archive-ledger-postgres:
     image: postgres:16
@@ -9,6 +11,7 @@ services:
       POSTGRES_PASSWORD: ${ARCHIVE_LEDGER_POSTGRES_PASSWORD:?ARCHIVE_LEDGER_POSTGRES_PASSWORD is required}
     expose:
       - "5432"
+    shm_size: "512m"
     volumes:
       - archive-ledger-postgres-data:/var/lib/postgresql/data
     healthcheck:

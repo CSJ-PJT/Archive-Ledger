@@ -488,13 +488,15 @@ public class LedgerService {
 
     private WorkdayDemand ledgerWorkdayDemand(LocalDate workDate) {
         Date day = Date.valueOf(workDate);
-        int transactionsReceived = count("select count(*) from received_event where cast(received_at as date)=?", day);
-        int settlementReady = count("select count(*) from finance_transaction where status='SETTLEMENT_READY' and cast(occurred_at as date)=?", day);
-        int approvalRequired = count("select count(*) from finance_transaction where status='APPROVAL_REQUIRED' and cast(created_at as date)=?", day);
+        Timestamp dayStart = dayStart(workDate);
+        Timestamp dayEnd = dayEnd(workDate);
+        int transactionsReceived = count("select count(*) from received_event where received_at>=? and received_at<?", dayStart, dayEnd);
+        int settlementReady = count("select count(*) from finance_transaction where status='SETTLEMENT_READY' and occurred_at>=? and occurred_at<?", dayStart, dayEnd);
+        int approvalRequired = count("select count(*) from finance_transaction where status='APPROVAL_REQUIRED' and created_at>=? and created_at<?", dayStart, dayEnd);
         int mismatch = count("select coalesce((select mismatch_count from reconciliation_result where reconciliation_date=? order by created_at desc limit 1), 0)", day);
-        int reconciliationIssues = Math.max(mismatch, count("select count(*) from received_event where processing_status='FAILED' and cast(received_at as date)=?", day));
-        int callbackDemand = count("select count(*) from approval_request where status='REQUESTED' and cast(requested_at as date)=?", day);
-        int callbackFailures = count("select count(*) from audit_log where action='ARCHIVEOS_APPROVAL_DEGRADED' and cast(created_at as date)=?", day);
+        int reconciliationIssues = Math.max(mismatch, count("select count(*) from received_event where processing_status='FAILED' and received_at>=? and received_at<?", dayStart, dayEnd));
+        int callbackDemand = count("select count(*) from approval_request where status='REQUESTED' and requested_at>=? and requested_at<?", dayStart, dayEnd);
+        int callbackFailures = count("select count(*) from audit_log where action='ARCHIVEOS_APPROVAL_DEGRADED' and created_at>=? and created_at<?", dayStart, dayEnd);
         return new WorkdayDemand(transactionsReceived, settlementReady, approvalRequired, reconciliationIssues, callbackDemand, callbackFailures);
     }
 
@@ -878,17 +880,19 @@ public class LedgerService {
      */
     private SettlementBalanceSummary currentDayBalanceSummary(LocalDate workDate) {
         Date day = Date.valueOf(workDate);
-        int transactionsReceived = count("select count(*) from received_event where cast(received_at as date)=?", day);
-        int transactionsProcessed = count("select count(*) from received_event where cast(received_at as date)=? and processing_status='PROCESSED'", day);
+        Timestamp dayStart = dayStart(workDate);
+        Timestamp dayEnd = dayEnd(workDate);
+        int transactionsReceived = count("select count(*) from received_event where received_at>=? and received_at<?", dayStart, dayEnd);
+        int transactionsProcessed = count("select count(*) from received_event where received_at>=? and received_at<? and processing_status='PROCESSED'", dayStart, dayEnd);
         int transactionsBacklog = Math.max(0, transactionsReceived - transactionsProcessed);
-        int settlementCompleted = count("select count(distinct transaction_id) from settlement_detail where cast(created_at as date)=? and status='SETTLED'", day);
-        int approvalReviewed = count("select count(*) from approval_request where cast(decided_at as date)=? and status in ('APPROVED','REJECTED')", day);
+        int settlementCompleted = count("select count(distinct transaction_id) from settlement_detail where created_at>=? and created_at<? and status='SETTLED'", dayStart, dayEnd);
+        int approvalReviewed = count("select count(*) from approval_request where decided_at>=? and decided_at<? and status in ('APPROVED','REJECTED')", dayStart, dayEnd);
         int reconciliationProcessed = count("select count(*) from reconciliation_result where reconciliation_date=? and status='OK'", day);
         int approvalBacklog = count("select count(*) from finance_transaction where status='APPROVAL_REQUIRED'");
         int settlementBacklog = count("select count(*) from finance_transaction where status='SETTLEMENT_READY'");
         int reconciliationBacklog = count("select coalesce((select mismatch_count from reconciliation_result where reconciliation_date=? order by created_at desc limit 1),0)", day);
         int callbackBacklog = count("select count(*) from approval_request where status='REQUESTED'");
-        int callbackFailures = count("select count(*) from audit_log where action='ARCHIVEOS_APPROVAL_DEGRADED' and cast(created_at as date)=?", day);
+        int callbackFailures = count("select count(*) from audit_log where action='ARCHIVEOS_APPROVAL_DEGRADED' and created_at>=? and created_at<?", dayStart, dayEnd);
 
         BigDecimal transactionRevenue = BigDecimal.valueOf(transactionsProcessed).multiply(TRANSACTION_REVENUE_PER_UNIT);
         BigDecimal settlementRevenue = BigDecimal.valueOf(settlementCompleted).multiply(SETTLEMENT_REVENUE_PER_UNIT);
@@ -960,8 +964,10 @@ public class LedgerService {
                 .add(rs.getBigDecimal("approval_review_revenue"));
         int transactionsProcessed = rs.getInt("transactions_processed");
         Date day = Date.valueOf(workDate);
-        int settlementCompleted = count("select count(distinct transaction_id) from settlement_detail where cast(created_at as date)=? and status='SETTLED'", day);
-        int approvalReviewed = count("select count(*) from approval_request where cast(decided_at as date)=? and status in ('APPROVED','REJECTED')", day);
+        Timestamp dayStart = dayStart(workDate);
+        Timestamp dayEnd = dayEnd(workDate);
+        int settlementCompleted = count("select count(distinct transaction_id) from settlement_detail where created_at>=? and created_at<? and status='SETTLED'", dayStart, dayEnd);
+        int approvalReviewed = count("select count(*) from approval_request where decided_at>=? and decided_at<? and status in ('APPROVED','REJECTED')", dayStart, dayEnd);
         int reconciliationProcessed = count("select count(*) from reconciliation_result where reconciliation_date=? and status='OK'", day);
         BigDecimal realizedOperatingCost = ledgerOperatingCost(transactionsProcessed, settlementCompleted,
                 reconciliationProcessed, approvalReviewed, rs.getBigDecimal("workforce_cost"));
@@ -1026,11 +1032,21 @@ public class LedgerService {
     }
 
     private String latestSettlementCycleId(LocalDate workDate) {
+        Timestamp dayStart = dayStart(workDate);
+        Timestamp dayEnd = dayEnd(workDate);
         return jdbc.query("""
                 select settlement_cycle_id from received_event
-                where cast(received_at as date)=? and settlement_cycle_id is not null
+                where received_at>=? and received_at<? and settlement_cycle_id is not null
                 order by received_at desc limit 1
-                """, rs -> rs.next() ? rs.getString(1) : null, Date.valueOf(workDate));
+                """, rs -> rs.next() ? rs.getString(1) : null, dayStart, dayEnd);
+    }
+
+    private Timestamp dayStart(LocalDate workDate) {
+        return Timestamp.valueOf(workDate.atStartOfDay());
+    }
+
+    private Timestamp dayEnd(LocalDate workDate) {
+        return Timestamp.valueOf(workDate.plusDays(1).atStartOfDay());
     }
 
     private BigDecimal previousCashBalance(LocalDate workDate) {
