@@ -59,10 +59,12 @@ public class LedgerService {
     private static final int MAX_BULK_EVENTS = 1_000;
     private static final int LEDGER_BASELINE_DAILY_CAPACITY = 500;
     private static final String TARGET_LEDGER = "Archive-Ledger";
-    private static final BigDecimal TRANSACTION_REVENUE_PER_UNIT = new BigDecimal("120");
-    private static final BigDecimal SETTLEMENT_REVENUE_PER_UNIT = new BigDecimal("700");
-    private static final BigDecimal RECONCILIATION_REVENUE_PER_UNIT = new BigDecimal("500");
-    private static final BigDecimal APPROVAL_REVENUE_PER_UNIT = new BigDecimal("900");
+    // Synthetic tariffs include each activity's share of daily infrastructure overhead. The resulting
+    // service-level target is a conservative 4-12% margin rather than a structurally guaranteed loss.
+    private static final BigDecimal TRANSACTION_REVENUE_PER_UNIT = new BigDecimal("145");
+    private static final BigDecimal SETTLEMENT_REVENUE_PER_UNIT = new BigDecimal("850");
+    private static final BigDecimal RECONCILIATION_REVENUE_PER_UNIT = new BigDecimal("600");
+    private static final BigDecimal APPROVAL_REVENUE_PER_UNIT = new BigDecimal("1100");
     private static final BigDecimal TRANSACTION_COST_PER_UNIT = new BigDecimal("110");
     private static final BigDecimal SETTLEMENT_COST_PER_UNIT = new BigDecimal("644");
     private static final BigDecimal RECONCILIATION_COST_PER_UNIT = new BigDecimal("460");
